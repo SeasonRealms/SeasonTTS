@@ -1,0 +1,37 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AssemblyName>SeasonTTS</AssemblyName>
+    <RootNamespace>SeasonTTS</RootNamespace>
+    <PackageId>SeasonTTS</PackageId>
+    <Title>SeasonTTS</Title>
+    <Authors>SeasonRealms</Authors>
+    <Company>SeasonRealms</Company>
+    <Description>SeasonTTS is a .NET text-to-speech library for Qwen3-TTS ONNX bundles, with simple CustomVoice and CloneVoice APIs.</Description>
+    <PackageTags>tts;onnx;qwen;qwen3-tts;speech;audio;voice-cloning</PackageTags>
+    <PackageProjectUrl>https://github.com/SeasonRealms/SeasonTTS</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/SeasonRealms/SeasonTTS</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageRequireLicenseAcceptance>false</PackageRequireLicenseAcceptance>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <NoWarn>$(NoWarn);CS1591;CS1572;CS1573</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Extensions.DependencyInjection.Abstractions" Version="10.0.8" />
+    <PackageReference Include="Microsoft.ML.OnnxRuntime" Version="1.26.0" />
+    <PackageReference Include="Microsoft.ML.Tokenizers" Version="2.0.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="README.md" Pack="true" PackagePath="\" />
+    <None Include="LICENSE" Pack="true" PackagePath="\" />
+    <None Include="THIRD-PARTY-NOTICES.md" Pack="true" PackagePath="\" />
+  </ItemGroup>
+
+</Project>
