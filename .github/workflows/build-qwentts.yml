@@ -71,23 +71,24 @@ jobs:
           Start-Process -FilePath $installerPath -ArgumentList "accept-licenses --default-answer --confirm-command install" -Wait -NoNewWindow
 
       - name: Configure CMake
-        shell: cmd
+        shell: pwsh
         working-directory: qwentts
         run: |
-          if not exist build mkdir build
-          cd build
-          cmake .. ^
-            -DCMAKE_BUILD_TYPE=Release ^
-            -DQWEN_SHARED=ON ^
-            -DGGML_CPU_ALL_VARIANTS=ON ^
-            -DGGML_CUDA=ON ^
-            -DGGML_VULKAN=ON ^
-            -DGGML_BACKEND_DL=ON ^
+          New-Item -ItemType Directory -Force -Path build | Out-Null
+          Set-Location build
+          cmake .. `
+            -G Ninja `
+            -DCMAKE_BUILD_TYPE=Release `
+            -DQWEN_SHARED=ON `
+            -DGGML_CPU_ALL_VARIANTS=ON `
+            -DGGML_CUDA=ON `
+            -DGGML_VULKAN=ON `
+            -DGGML_BACKEND_DL=ON `
             -DCMAKE_CUDA_ARCHITECTURES="75-virtual;80-virtual;86-real;89-real"
 
       - name: Build
         working-directory: qwentts/build
-        run: cmake --build . --config Release -j $env:NUMBER_OF_PROCESSORS
+        run: cmake --build . -j $env:NUMBER_OF_PROCESSORS
 
       - name: Collect artifacts
         shell: pwsh
@@ -95,9 +96,9 @@ jobs:
           $out = "out/runtimes/win-x64/native"
           New-Item -ItemType Directory -Force -Path $out | Out-Null
 
-          Copy-Item qwentts/build/Release/qwen.dll        -Destination $out -ErrorAction SilentlyContinue
-          Copy-Item qwentts/build/Release/qwen.lib        -Destination $out -ErrorAction SilentlyContinue
-          Get-ChildItem qwentts/build/Release -Filter "ggml-*.dll" | ForEach-Object {
+          Copy-Item qwentts/build/qwen.dll        -Destination $out -ErrorAction SilentlyContinue
+          Copy-Item qwentts/build/qwen.lib        -Destination $out -ErrorAction SilentlyContinue
+          Get-ChildItem qwentts/build -Filter "ggml-*.dll" | ForEach-Object {
             Copy-Item $_.FullName -Destination $out
           }
 
