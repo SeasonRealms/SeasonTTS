@@ -86,7 +86,9 @@ jobs:
 
           Copy-Item qwentts/build/qwen.dll        -Destination $out -ErrorAction SilentlyContinue
           Copy-Item qwentts/build/qwen.lib        -Destination $out -ErrorAction SilentlyContinue
-          Get-ChildItem qwentts/build -Filter "ggml-*.dll" | ForEach-Object {
+          # qwen.dll directly depends on ggml.dll and ggml-base.dll in addition to
+          # the backend-specific ggml-*.dll files, so collect every Windows ggml DLL.
+          Get-ChildItem qwentts/build -Filter "ggml*.dll" | ForEach-Object {
             Copy-Item $_.FullName -Destination $out
           }
 
