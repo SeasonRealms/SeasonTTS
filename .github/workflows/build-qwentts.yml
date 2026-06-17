@@ -3,6 +3,19 @@ name: Build qwentts.cpp Native Libraries
 on:
   workflow_dispatch:
     inputs:
+      build_target:
+        description: "Platform(s) to build"
+        required: true
+        type: choice
+        default: "all"
+        options:
+          - all
+          - windows
+          - linux
+          - macos
+          - maccatalyst
+          - ios
+          - android
       qwentts_ref:
         description: "qwentts.cpp tag / branch / commit"
         required: true
@@ -28,6 +41,7 @@ jobs:
   #  Windows x64 — CPU + CUDA + Vulkan (DL mode)
   # ══════════════════════════════════════════════════════════════════
   build-windows:
+    if: inputs.build_target == 'windows' || inputs.build_target == 'all'
     runs-on: windows-latest
     timeout-minutes: 120
     steps:
@@ -37,6 +51,7 @@ jobs:
           repository: ${{ env.QWENTTS_REPO }}
           ref: ${{ github.event.inputs.qwentts_ref }}
           path: qwentts
+          persist-credentials: false
 
       - name: Checkout ggml fork
         uses: actions/checkout@v4
@@ -44,6 +59,7 @@ jobs:
           repository: ${{ env.GGML_REPO }}
           ref: ${{ github.event.inputs.ggml_ref }}
           path: qwentts/ggml
+          persist-credentials: false
 
       - name: Setup MSBuild
         uses: microsoft/setup-msbuild@v2
@@ -116,6 +132,7 @@ jobs:
   #  Linux x64 — CPU + CUDA + Vulkan (DL mode)
   # ══════════════════════════════════════════════════════════════════
   build-linux:
+    if: inputs.build_target == 'linux' || inputs.build_target == 'all'
     runs-on: ubuntu-latest
     timeout-minutes: 120
     steps:
@@ -125,6 +142,7 @@ jobs:
           repository: ${{ env.QWENTTS_REPO }}
           ref: ${{ github.event.inputs.qwentts_ref }}
           path: qwentts
+          persist-credentials: false
 
       - name: Checkout ggml fork
         uses: actions/checkout@v4
@@ -132,6 +150,7 @@ jobs:
           repository: ${{ env.GGML_REPO }}
           ref: ${{ github.event.inputs.ggml_ref }}
           path: qwentts/ggml
+          persist-credentials: false
 
       - name: Install system dependencies
         run: |
@@ -184,6 +203,7 @@ jobs:
   #  macOS ARM64 — Metal backend (shared for desktop + MacCatalyst)
   # ══════════════════════════════════════════════════════════════════
   build-macos:
+    if: inputs.build_target == 'macos' || inputs.build_target == 'maccatalyst' || inputs.build_target == 'all'
     runs-on: macos-latest
     timeout-minutes: 90
     strategy:
@@ -191,8 +211,10 @@ jobs:
         include:
           - rid: osx-arm64
             deployment_target: "13.0"
+            platform: macos
           - rid: maccatalyst-arm64
             deployment_target: "15.0"
+            platform: maccatalyst
     steps:
       - name: Checkout qwentts.cpp
         uses: actions/checkout@v4
@@ -200,6 +222,7 @@ jobs:
           repository: ${{ env.QWENTTS_REPO }}
           ref: ${{ github.event.inputs.qwentts_ref }}
           path: qwentts
+          persist-credentials: false
 
       - name: Checkout ggml fork
         uses: actions/checkout@v4
@@ -207,38 +230,29 @@ jobs:
           repository: ${{ env.GGML_REPO }}
           ref: ${{ github.event.inputs.ggml_ref }}
           path: qwentts/ggml
+          persist-credentials: false
 
       - name: Configure CMake
+        if: inputs.build_target == matrix.platform || inputs.build_target == 'all'
         working-directory: qwentts
         run: |
           mkdir build && cd build
-          if [ "${{ matrix.rid }}" = "maccatalyst-arm64" ]; then
-            # MacCatalyst: build as macOS dylib targeting the Catalyst-compatible SDK.
-            # ggml Metal backend is the same for both desktop and Catalyst on Apple Silicon.
-            cmake .. \
-              -DCMAKE_BUILD_TYPE=Release \
-              -DQWEN_SHARED=ON \
-              -DGGML_METAL=ON \
-              -DGGML_CPU_ALL_VARIANTS=ON \
-              -DCMAKE_OSX_ARCHITECTURES=arm64 \
-              -DCMAKE_OSX_DEPLOYMENT_TARGET=${{ matrix.deployment_target }} \
-              -G Ninja
-          else
-            cmake .. \
-              -DCMAKE_BUILD_TYPE=Release \
-              -DQWEN_SHARED=ON \
-              -DGGML_METAL=ON \
-              -DGGML_CPU_ALL_VARIANTS=ON \
-              -DCMAKE_OSX_ARCHITECTURES=arm64 \
-              -DCMAKE_OSX_DEPLOYMENT_TARGET=${{ matrix.deployment_target }} \
-              -G Ninja
-          fi
+          cmake .. \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DQWEN_SHARED=ON \
+            -DGGML_METAL=ON \
+            -DGGML_CPU_ALL_VARIANTS=ON \
+            -DCMAKE_OSX_ARCHITECTURES=arm64 \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=${{ matrix.deployment_target }} \
+            -G Ninja
 
       - name: Build
+        if: inputs.build_target == matrix.platform || inputs.build_target == 'all'
         working-directory: qwentts/build
         run: ninja -j $(sysctl -n hw.logicalcpu)
 
       - name: Collect artifacts
+        if: inputs.build_target == matrix.platform || inputs.build_target == 'all'
         run: |
           out="out/runtimes/${{ matrix.rid }}/native"
           mkdir -p "$out"
@@ -250,6 +264,7 @@ jobs:
           ls -la "$out/"
 
       - name: Upload macOS artifacts
+        if: inputs.build_target == matrix.platform || inputs.build_target == 'all'
         uses: actions/upload-artifact@v4
         with:
           name: qwentts-${{ matrix.rid }}
@@ -260,6 +275,7 @@ jobs:
   #  iOS ARM64 — Metal backend, static library
   # ══════════════════════════════════════════════════════════════════
   build-ios:
+    if: inputs.build_target == 'ios' || inputs.build_target == 'all'
     runs-on: macos-latest
     timeout-minutes: 90
     steps:
@@ -269,6 +285,7 @@ jobs:
           repository: ${{ env.QWENTTS_REPO }}
           ref: ${{ github.event.inputs.qwentts_ref }}
           path: qwentts
+          persist-credentials: false
 
       - name: Checkout ggml fork
         uses: actions/checkout@v4
@@ -276,6 +293,7 @@ jobs:
           repository: ${{ env.GGML_REPO }}
           ref: ${{ github.event.inputs.ggml_ref }}
           path: qwentts/ggml
+          persist-credentials: false
 
       - name: Configure CMake (iOS static)
         working-directory: qwentts
@@ -326,6 +344,7 @@ jobs:
   #  Android ARM64 — CPU + Vulkan (DL mode)
   # ══════════════════════════════════════════════════════════════════
   build-android:
+    if: inputs.build_target == 'android' || inputs.build_target == 'all'
     runs-on: ubuntu-latest
     timeout-minutes: 120
     strategy:
@@ -338,6 +357,7 @@ jobs:
           repository: ${{ env.QWENTTS_REPO }}
           ref: ${{ github.event.inputs.qwentts_ref }}
           path: qwentts
+          persist-credentials: false
 
       - name: Checkout ggml fork
         uses: actions/checkout@v4
@@ -345,6 +365,7 @@ jobs:
           repository: ${{ env.GGML_REPO }}
           ref: ${{ github.event.inputs.ggml_ref }}
           path: qwentts/ggml
+          persist-credentials: false
 
       - name: Setup Android NDK
         uses: nttld/setup-ndk@v1
