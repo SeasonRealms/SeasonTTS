@@ -42,7 +42,7 @@ jobs:
   # ══════════════════════════════════════════════════════════════════
   build-windows:
     if: inputs.build_target == 'windows' || inputs.build_target == 'all'
-    runs-on: windows-latest
+    runs-on: windows-2022
     timeout-minutes: 120
     steps:
       - name: Clone qwentts.cpp
