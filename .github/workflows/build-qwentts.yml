@@ -19,11 +19,11 @@ on:
       qwentts_ref:
         description: "qwentts.cpp tag / branch / commit"
         required: true
-        default: "main"
+        default: "master"
       ggml_ref:
         description: "ggml fork tag / branch / commit"
         required: false
-        default: "main"
+        default: "master"
       cuda_version:
         description: "CUDA Toolkit version (Windows/Linux)"
         required: false
