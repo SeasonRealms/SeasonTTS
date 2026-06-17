@@ -120,7 +120,7 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y ninja-build libvulkan-dev glslc glslang-tools vulkan-tools
+          sudo apt-get install -y ninja-build libvulkan-dev glslc glslang-tools vulkan-tools spirv-headers
 
       - name: Install CUDA Toolkit
         uses: Jimver/cuda-toolkit@v0.2.35
