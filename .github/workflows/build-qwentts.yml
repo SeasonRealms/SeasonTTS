@@ -27,7 +27,7 @@ on:
       cuda_version:
         description: "CUDA Toolkit version (Windows/Linux)"
         required: false
-        default: "13.3.0"
+        default: "13.2.0"
 
 permissions:
   contents: read
@@ -90,6 +90,7 @@ jobs:
             -DGGML_CUDA=ON `
             -DGGML_VULKAN=ON `
             -DGGML_BACKEND_DL=ON `
+            -DCMAKE_CUDA_FLAGS="-allow-unsupported-compiler" `
             -DCMAKE_CUDA_ARCHITECTURES="75-virtual;80-virtual;86-real;89-real"
 
       - name: Build
