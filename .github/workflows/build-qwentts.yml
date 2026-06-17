@@ -74,6 +74,7 @@ jobs:
         uses: ilammy/msvc-dev-cmd@v1
         with:
           arch: amd64
+          vsversion: "2022"
 
       - name: Configure CMake
         shell: pwsh
@@ -90,7 +91,6 @@ jobs:
             -DGGML_CUDA=ON `
             -DGGML_VULKAN=ON `
             -DGGML_BACKEND_DL=ON `
-            -DCMAKE_CUDA_FLAGS="-allow-unsupported-compiler" `
             -DCMAKE_CUDA_ARCHITECTURES="75-virtual;80-virtual;86-real;89-real"
 
       - name: Build
