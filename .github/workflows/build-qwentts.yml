@@ -52,7 +52,7 @@ jobs:
         run: git clone --depth 1 --branch "${{ github.event.inputs.ggml_ref }}" "https://github.com/${{ env.GGML_REPO }}.git" qwentts/ggml
 
       - name: Install Vulkan SDK
-        uses: jakoch/install-vulkan-sdk-action@v2
+        uses: jakoch/install-vulkan-sdk-action@v1
 
       - name: Setup MSVC Developer Command Prompt
         uses: ilammy/msvc-dev-cmd@v1
