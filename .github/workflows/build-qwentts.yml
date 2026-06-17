@@ -52,13 +52,7 @@ jobs:
         run: git clone --depth 1 --branch "${{ github.event.inputs.ggml_ref }}" "https://github.com/${{ env.GGML_REPO }}.git" qwentts/ggml
 
       - name: Install Vulkan SDK
-        shell: pwsh
-        run: |
-          $vulkanVersion = "1.3.296.0"
-          $installerUrl = "https://sdk.lunarg.com/sdk/download/$vulkanVersion/windows/VulkanSDK-$vulkanVersion-Installer.exe"
-          $installerPath = "${{ runner.temp }}\VulkanSDK.exe"
-          Invoke-WebRequest -Uri $installerUrl -OutFile $installerPath -MaximumRetryCount 3
-          Start-Process -FilePath $installerPath -ArgumentList "accept-licenses --default-answer --confirm-command install" -Wait -NoNewWindow
+        uses: jakoch/install-vulkan-sdk-action@v2
 
       - name: Setup MSVC Developer Command Prompt
         uses: ilammy/msvc-dev-cmd@v1
