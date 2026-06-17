@@ -45,21 +45,15 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 120
     steps:
-      - name: Checkout qwentts.cpp
-        uses: actions/checkout@v4
-        with:
-          repository: ${{ env.QWENTTS_REPO }}
-          ref: ${{ github.event.inputs.qwentts_ref }}
-          path: qwentts
-          persist-credentials: false
+      - name: Clone qwentts.cpp
+        run: |
+          git clone --depth 1 --branch "${{ github.event.inputs.qwentts_ref }}" \
+            "https://github.com/${{ env.QWENTTS_REPO }}.git" qwentts
 
-      - name: Checkout ggml fork
-        uses: actions/checkout@v4
-        with:
-          repository: ${{ env.GGML_REPO }}
-          ref: ${{ github.event.inputs.ggml_ref }}
-          path: qwentts/ggml
-          persist-credentials: false
+      - name: Clone ggml fork
+        run: |
+          git clone --depth 1 --branch "${{ github.event.inputs.ggml_ref }}" \
+            "https://github.com/${{ env.GGML_REPO }}.git" qwentts/ggml
 
       - name: Setup MSBuild
         uses: microsoft/setup-msbuild@v2
@@ -136,21 +130,15 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 120
     steps:
-      - name: Checkout qwentts.cpp
-        uses: actions/checkout@v4
-        with:
-          repository: ${{ env.QWENTTS_REPO }}
-          ref: ${{ github.event.inputs.qwentts_ref }}
-          path: qwentts
-          persist-credentials: false
+      - name: Clone qwentts.cpp
+        run: |
+          git clone --depth 1 --branch "${{ github.event.inputs.qwentts_ref }}" \
+            "https://github.com/${{ env.QWENTTS_REPO }}.git" qwentts
 
-      - name: Checkout ggml fork
-        uses: actions/checkout@v4
-        with:
-          repository: ${{ env.GGML_REPO }}
-          ref: ${{ github.event.inputs.ggml_ref }}
-          path: qwentts/ggml
-          persist-credentials: false
+      - name: Clone ggml fork
+        run: |
+          git clone --depth 1 --branch "${{ github.event.inputs.ggml_ref }}" \
+            "https://github.com/${{ env.GGML_REPO }}.git" qwentts/ggml
 
       - name: Install system dependencies
         run: |
@@ -216,21 +204,15 @@ jobs:
             deployment_target: "15.0"
             platform: maccatalyst
     steps:
-      - name: Checkout qwentts.cpp
-        uses: actions/checkout@v4
-        with:
-          repository: ${{ env.QWENTTS_REPO }}
-          ref: ${{ github.event.inputs.qwentts_ref }}
-          path: qwentts
-          persist-credentials: false
+      - name: Clone qwentts.cpp
+        run: |
+          git clone --depth 1 --branch "${{ github.event.inputs.qwentts_ref }}" \
+            "https://github.com/${{ env.QWENTTS_REPO }}.git" qwentts
 
-      - name: Checkout ggml fork
-        uses: actions/checkout@v4
-        with:
-          repository: ${{ env.GGML_REPO }}
-          ref: ${{ github.event.inputs.ggml_ref }}
-          path: qwentts/ggml
-          persist-credentials: false
+      - name: Clone ggml fork
+        run: |
+          git clone --depth 1 --branch "${{ github.event.inputs.ggml_ref }}" \
+            "https://github.com/${{ env.GGML_REPO }}.git" qwentts/ggml
 
       - name: Configure CMake
         if: inputs.build_target == matrix.platform || inputs.build_target == 'all'
@@ -279,21 +261,15 @@ jobs:
     runs-on: macos-latest
     timeout-minutes: 90
     steps:
-      - name: Checkout qwentts.cpp
-        uses: actions/checkout@v4
-        with:
-          repository: ${{ env.QWENTTS_REPO }}
-          ref: ${{ github.event.inputs.qwentts_ref }}
-          path: qwentts
-          persist-credentials: false
+      - name: Clone qwentts.cpp
+        run: |
+          git clone --depth 1 --branch "${{ github.event.inputs.qwentts_ref }}" \
+            "https://github.com/${{ env.QWENTTS_REPO }}.git" qwentts
 
-      - name: Checkout ggml fork
-        uses: actions/checkout@v4
-        with:
-          repository: ${{ env.GGML_REPO }}
-          ref: ${{ github.event.inputs.ggml_ref }}
-          path: qwentts/ggml
-          persist-credentials: false
+      - name: Clone ggml fork
+        run: |
+          git clone --depth 1 --branch "${{ github.event.inputs.ggml_ref }}" \
+            "https://github.com/${{ env.GGML_REPO }}.git" qwentts/ggml
 
       - name: Configure CMake (iOS static)
         working-directory: qwentts
@@ -351,21 +327,15 @@ jobs:
       matrix:
         abi: [arm64-v8a]
     steps:
-      - name: Checkout qwentts.cpp
-        uses: actions/checkout@v4
-        with:
-          repository: ${{ env.QWENTTS_REPO }}
-          ref: ${{ github.event.inputs.qwentts_ref }}
-          path: qwentts
-          persist-credentials: false
+      - name: Clone qwentts.cpp
+        run: |
+          git clone --depth 1 --branch "${{ github.event.inputs.qwentts_ref }}" \
+            "https://github.com/${{ env.QWENTTS_REPO }}.git" qwentts
 
-      - name: Checkout ggml fork
-        uses: actions/checkout@v4
-        with:
-          repository: ${{ env.GGML_REPO }}
-          ref: ${{ github.event.inputs.ggml_ref }}
-          path: qwentts/ggml
-          persist-credentials: false
+      - name: Clone ggml fork
+        run: |
+          git clone --depth 1 --branch "${{ github.event.inputs.ggml_ref }}" \
+            "https://github.com/${{ env.GGML_REPO }}.git" qwentts/ggml
 
       - name: Setup Android NDK
         uses: nttld/setup-ndk@v1
