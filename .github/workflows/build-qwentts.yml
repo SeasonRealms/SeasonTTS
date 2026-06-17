@@ -42,24 +42,14 @@ jobs:
   # ══════════════════════════════════════════════════════════════════
   build-windows:
     if: inputs.build_target == 'windows' || inputs.build_target == 'all'
-    runs-on: windows-2022
-    timeout-minutes: 120
+    runs-on: windows-latest
+    timeout-minutes: 60
     steps:
       - name: Clone qwentts.cpp
         run: git clone --depth 1 --branch "${{ github.event.inputs.qwentts_ref }}" "https://github.com/${{ env.QWENTTS_REPO }}.git" qwentts
 
       - name: Clone ggml fork
         run: git clone --depth 1 --branch "${{ github.event.inputs.ggml_ref }}" "https://github.com/${{ env.GGML_REPO }}.git" qwentts/ggml
-
-      - name: Setup MSBuild
-        uses: microsoft/setup-msbuild@v2
-
-      - name: Install CUDA Toolkit
-        uses: Jimver/cuda-toolkit@v0.2.35
-        with:
-          cuda: "${{ github.event.inputs.cuda_version }}"
-          method: "network"
-          sub-packages: '["cudart", "cublas", "cublas_dev", "nvrtc", "nvrtc_dev", "nvcc"]'
 
       - name: Install Vulkan SDK
         shell: pwsh
@@ -74,7 +64,6 @@ jobs:
         uses: ilammy/msvc-dev-cmd@v1
         with:
           arch: amd64
-          vsversion: "2022"
 
       - name: Configure CMake
         shell: pwsh
@@ -88,10 +77,8 @@ jobs:
             -DBUILD_SHARED_LIBS=ON `
             -DQWEN_SHARED=ON `
             -DGGML_CPU_ALL_VARIANTS=ON `
-            -DGGML_CUDA=ON `
             -DGGML_VULKAN=ON `
-            -DGGML_BACKEND_DL=ON `
-            -DCMAKE_CUDA_ARCHITECTURES="75-virtual;80-virtual;86-real;89-real"
+            -DGGML_BACKEND_DL=ON
 
       - name: Build
         working-directory: qwentts/build
