@@ -78,7 +78,10 @@ jobs:
           Set-Location build
           cmake .. `
             -G Ninja `
+            -DCMAKE_C_COMPILER=cl `
+            -DCMAKE_CXX_COMPILER=cl `
             -DCMAKE_BUILD_TYPE=Release `
+            -DBUILD_SHARED_LIBS=ON `
             -DQWEN_SHARED=ON `
             -DGGML_CPU_ALL_VARIANTS=ON `
             -DGGML_CUDA=ON `
@@ -147,6 +150,7 @@ jobs:
           mkdir build && cd build
           cmake .. \
             -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_SHARED_LIBS=ON \
             -DQWEN_SHARED=ON \
             -DGGML_CPU_ALL_VARIANTS=ON \
             -DGGML_CUDA=ON \
@@ -329,6 +333,7 @@ jobs:
             -DCMAKE_ANDROID_NDK=$ANDROID_NDK_HOME \
             -DCMAKE_ANDROID_API=26 \
             -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_SHARED_LIBS=ON \
             -DQWEN_SHARED=ON \
             -DGGML_VULKAN=ON \
             -DGGML_CPU_ALL_VARIANTS=ON \
