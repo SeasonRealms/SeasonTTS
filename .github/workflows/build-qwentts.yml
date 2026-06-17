@@ -46,14 +46,10 @@ jobs:
     timeout-minutes: 120
     steps:
       - name: Clone qwentts.cpp
-        run: |
-          git clone --depth 1 --branch "${{ github.event.inputs.qwentts_ref }}" \
-            "https://github.com/${{ env.QWENTTS_REPO }}.git" qwentts
+        run: git clone --depth 1 --branch "${{ github.event.inputs.qwentts_ref }}" "https://github.com/${{ env.QWENTTS_REPO }}.git" qwentts
 
       - name: Clone ggml fork
-        run: |
-          git clone --depth 1 --branch "${{ github.event.inputs.ggml_ref }}" \
-            "https://github.com/${{ env.GGML_REPO }}.git" qwentts/ggml
+        run: git clone --depth 1 --branch "${{ github.event.inputs.ggml_ref }}" "https://github.com/${{ env.GGML_REPO }}.git" qwentts/ggml
 
       - name: Setup MSBuild
         uses: microsoft/setup-msbuild@v2
@@ -131,14 +127,10 @@ jobs:
     timeout-minutes: 120
     steps:
       - name: Clone qwentts.cpp
-        run: |
-          git clone --depth 1 --branch "${{ github.event.inputs.qwentts_ref }}" \
-            "https://github.com/${{ env.QWENTTS_REPO }}.git" qwentts
+        run: git clone --depth 1 --branch "${{ github.event.inputs.qwentts_ref }}" "https://github.com/${{ env.QWENTTS_REPO }}.git" qwentts
 
       - name: Clone ggml fork
-        run: |
-          git clone --depth 1 --branch "${{ github.event.inputs.ggml_ref }}" \
-            "https://github.com/${{ env.GGML_REPO }}.git" qwentts/ggml
+        run: git clone --depth 1 --branch "${{ github.event.inputs.ggml_ref }}" "https://github.com/${{ env.GGML_REPO }}.git" qwentts/ggml
 
       - name: Install system dependencies
         run: |
@@ -205,14 +197,10 @@ jobs:
             platform: maccatalyst
     steps:
       - name: Clone qwentts.cpp
-        run: |
-          git clone --depth 1 --branch "${{ github.event.inputs.qwentts_ref }}" \
-            "https://github.com/${{ env.QWENTTS_REPO }}.git" qwentts
+        run: git clone --depth 1 --branch "${{ github.event.inputs.qwentts_ref }}" "https://github.com/${{ env.QWENTTS_REPO }}.git" qwentts
 
       - name: Clone ggml fork
-        run: |
-          git clone --depth 1 --branch "${{ github.event.inputs.ggml_ref }}" \
-            "https://github.com/${{ env.GGML_REPO }}.git" qwentts/ggml
+        run: git clone --depth 1 --branch "${{ github.event.inputs.ggml_ref }}" "https://github.com/${{ env.GGML_REPO }}.git" qwentts/ggml
 
       - name: Configure CMake
         if: inputs.build_target == matrix.platform || inputs.build_target == 'all'
@@ -262,14 +250,10 @@ jobs:
     timeout-minutes: 90
     steps:
       - name: Clone qwentts.cpp
-        run: |
-          git clone --depth 1 --branch "${{ github.event.inputs.qwentts_ref }}" \
-            "https://github.com/${{ env.QWENTTS_REPO }}.git" qwentts
+        run: git clone --depth 1 --branch "${{ github.event.inputs.qwentts_ref }}" "https://github.com/${{ env.QWENTTS_REPO }}.git" qwentts
 
       - name: Clone ggml fork
-        run: |
-          git clone --depth 1 --branch "${{ github.event.inputs.ggml_ref }}" \
-            "https://github.com/${{ env.GGML_REPO }}.git" qwentts/ggml
+        run: git clone --depth 1 --branch "${{ github.event.inputs.ggml_ref }}" "https://github.com/${{ env.GGML_REPO }}.git" qwentts/ggml
 
       - name: Configure CMake (iOS static)
         working-directory: qwentts
@@ -328,14 +312,10 @@ jobs:
         abi: [arm64-v8a]
     steps:
       - name: Clone qwentts.cpp
-        run: |
-          git clone --depth 1 --branch "${{ github.event.inputs.qwentts_ref }}" \
-            "https://github.com/${{ env.QWENTTS_REPO }}.git" qwentts
+        run: git clone --depth 1 --branch "${{ github.event.inputs.qwentts_ref }}" "https://github.com/${{ env.QWENTTS_REPO }}.git" qwentts
 
       - name: Clone ggml fork
-        run: |
-          git clone --depth 1 --branch "${{ github.event.inputs.ggml_ref }}" \
-            "https://github.com/${{ env.GGML_REPO }}.git" qwentts/ggml
+        run: git clone --depth 1 --branch "${{ github.event.inputs.ggml_ref }}" "https://github.com/${{ env.GGML_REPO }}.git" qwentts/ggml
 
       - name: Setup Android NDK
         uses: nttld/setup-ndk@v1
