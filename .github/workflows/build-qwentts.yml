@@ -126,9 +126,17 @@ jobs:
         uses: Jimver/cuda-toolkit@v0.2.35
         with:
           cuda: "${{ github.event.inputs.cuda_version }}"
-          method: "local"
-          sub-packages: '["cudart", "cublas", "cublas_dev", "nvrtc", "nvrtc_dev", "nvcc"]'
-          linux-local-args: '["--toolkit", "--silent"]'
+          method: "network"
+          # cudart/nvrtc/nvcc follow the cuda-{name}-{ver} convention and work.
+          # cublas/nvrtc_dev were renamed in CUDA 13.x → install manually below.
+          sub-packages: '["cudart", "nvrtc", "nvcc"]'
+
+      - name: Install CUDA 13.x renamed packages
+        run: |
+          sudo apt-get install -y \
+            cublas13 \
+            libcublas-dev-13-2 \
+            cuda-nvrtc-dev-13-2
 
       - name: Configure CMake
         working-directory: qwentts
