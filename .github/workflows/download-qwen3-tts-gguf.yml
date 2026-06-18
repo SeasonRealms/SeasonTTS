@@ -1,0 +1,128 @@
+name: Download Qwen3-TTS GGUF
+
+on:
+  workflow_dispatch:
+    inputs:
+      gguf_file:
+        description: Select a single GGUF file to download from Serveurperso/Qwen3-TTS-GGUF
+        required: true
+        type: choice
+        options:
+          - qwen-talker-0.6b-base-BF16.gguf
+          - qwen-talker-0.6b-base-F32.gguf
+          - qwen-talker-0.6b-base-Q4_K_M.gguf
+          - qwen-talker-0.6b-base-Q8_0.gguf
+          - qwen-talker-0.6b-customvoice-BF16.gguf
+          - qwen-talker-0.6b-customvoice-F32.gguf
+          - qwen-talker-0.6b-customvoice-Q4_K_M.gguf
+          - qwen-talker-0.6b-customvoice-Q8_0.gguf
+          - qwen-talker-1.7b-base-BF16.gguf
+          - qwen-talker-1.7b-base-F32.gguf
+          - qwen-talker-1.7b-base-Q4_K_M.gguf
+          - qwen-talker-1.7b-base-Q8_0.gguf
+          - qwen-talker-1.7b-customvoice-BF16.gguf
+          - qwen-talker-1.7b-customvoice-F32.gguf
+          - qwen-talker-1.7b-customvoice-Q4_K_M.gguf
+          - qwen-talker-1.7b-customvoice-Q8_0.gguf
+          - qwen-talker-1.7b-voicedesign-BF16.gguf
+          - qwen-talker-1.7b-voicedesign-F32.gguf
+          - qwen-talker-1.7b-voicedesign-Q4_K_M.gguf
+          - qwen-talker-1.7b-voicedesign-Q8_0.gguf
+          - qwen-tokenizer-12hz-BF16.gguf
+          - qwen-tokenizer-12hz-F32.gguf
+          - qwen-tokenizer-12hz-Q4_K_M.gguf
+          - qwen-tokenizer-12hz-Q8_0.gguf
+      repo_id:
+        description: Hugging Face model repo
+        required: true
+        default: Serveurperso/Qwen3-TTS-GGUF
+        type: string
+      revision:
+        description: Hugging Face revision
+        required: true
+        default: main
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  download:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Hugging Face downloader
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install "huggingface_hub[hf_xet]>=0.33.0"
+
+      - name: Download selected GGUF
+        env:
+          HF_HUB_ENABLE_HF_TRANSFER: "1"
+          GGUF_FILE: ${{ inputs.gguf_file }}
+          REPO_ID: ${{ inputs.repo_id }}
+          REVISION: ${{ inputs.revision }}
+        run: |
+          set -euxo pipefail
+          mkdir -p dist
+          python - <<'PY'
+          import hashlib
+          import os
+          from pathlib import Path
+          from huggingface_hub import hf_hub_download
+
+          repo_id = os.environ["REPO_ID"]
+          revision = os.environ["REVISION"]
+          filename = os.environ["GGUF_FILE"]
+
+          local_path = hf_hub_download(
+              repo_id=repo_id,
+              filename=filename,
+              revision=revision,
+              repo_type="model",
+              local_dir="dist",
+              local_dir_use_symlinks=False,
+          )
+
+          path = Path(local_path)
+          sha256 = hashlib.sha256()
+          with path.open("rb") as f:
+              for chunk in iter(lambda: f.read(1024 * 1024), b""):
+                  sha256.update(chunk)
+
+          metadata = Path("dist") / "artifact-info.txt"
+          metadata.write_text(
+              "\n".join(
+                  [
+                      f"repo_id={repo_id}",
+                      f"revision={revision}",
+                      f"filename={filename}",
+                      f"size_bytes={path.stat().st_size}",
+                      f"sha256={sha256.hexdigest()}",
+                  ]
+              )
+              + "\n",
+              encoding="utf-8",
+          )
+          print(f"Downloaded to: {path}")
+          PY
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: gguf-${{ inputs.gguf_file }}
+          path: |
+            dist/${{ inputs.gguf_file }}
+            dist/artifact-info.txt
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
