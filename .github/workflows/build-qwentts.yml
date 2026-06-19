@@ -42,8 +42,8 @@ jobs:
   # ══════════════════════════════════════════════════════════════════
   build-windows:
     if: inputs.build_target == 'windows' || inputs.build_target == 'all'
-    runs-on: windows-latest
-    timeout-minutes: 60
+    runs-on: windows-2022
+    timeout-minutes: 90
     steps:
       - name: Clone qwentts.cpp
         run: git clone --depth 1 --branch "${{ github.event.inputs.qwentts_ref }}" "https://github.com/${{ env.QWENTTS_REPO }}.git" qwentts
@@ -53,6 +53,11 @@ jobs:
 
       - name: Install Vulkan SDK
         uses: jakoch/install-vulkan-sdk-action@v1
+
+      - name: Install CUDA Toolkit
+        uses: Jimver/cuda-toolkit@v0.2.35
+        with:
+          cuda: "${{ github.event.inputs.cuda_version }}"
 
       - name: Setup MSVC Developer Command Prompt
         uses: ilammy/msvc-dev-cmd@v1
@@ -71,8 +76,10 @@ jobs:
             -DBUILD_SHARED_LIBS=ON `
             -DQWEN_SHARED=ON `
             -DGGML_CPU_ALL_VARIANTS=ON `
+            -DGGML_CUDA=ON `
             -DGGML_VULKAN=ON `
-            -DGGML_BACKEND_DL=ON
+            -DGGML_BACKEND_DL=ON `
+            -DCMAKE_CUDA_ARCHITECTURES="75-virtual;80-virtual;86-real;89-real"
 
       - name: Build
         working-directory: qwentts/build
@@ -94,6 +101,26 @@ jobs:
 
           # Public header for binding consumers
           Copy-Item qwentts/src/qwen.h -Destination $out
+
+          # Bundle CUDA runtime DLLs so end users do NOT need to install the
+          # CUDA Toolkit.  GGML's CUDA backend links against cudart + cublas;
+          # the other libraries are dependencies of those or may be needed by
+          # future GGML operations (cufft, curand, cusparse, nvJitLink).
+          # cuDNN is NOT included — qwentts.cpp is transformer-based (attention
+          # + MLP), not convolution-based, so cuDNN would never be loaded.
+          if (Test-Path env:CUDA_PATH) {
+            $cudaBin = Join-Path $env:CUDA_PATH "bin"
+            if (Test-Path $cudaBin) {
+              Get-ChildItem $cudaBin -Filter "cudart64_*.dll"    | ForEach-Object { Copy-Item $_.FullName -Destination $out }
+              Get-ChildItem $cudaBin -Filter "cublas64_*.dll"    | ForEach-Object { Copy-Item $_.FullName -Destination $out }
+              Get-ChildItem $cudaBin -Filter "cublasLt64_*.dll"  | ForEach-Object { Copy-Item $_.FullName -Destination $out }
+              Get-ChildItem $cudaBin -Filter "cufft64_*.dll"     | ForEach-Object { Copy-Item $_.FullName -Destination $out }
+              Get-ChildItem $cudaBin -Filter "curand64_*.dll"    | ForEach-Object { Copy-Item $_.FullName -Destination $out }
+              Get-ChildItem $cudaBin -Filter "cusparse64_*.dll"  | ForEach-Object { Copy-Item $_.FullName -Destination $out }
+              Get-ChildItem $cudaBin -Filter "nvJitLink_*.dll"   | ForEach-Object { Copy-Item $_.FullName -Destination $out }
+              Write-Host "CUDA runtime DLLs copied from: $cudaBin"
+            }
+          }
 
           Write-Host "Windows artifacts:"
           Get-ChildItem $out | ForEach-Object { Write-Host "  $($_.Name)" }
