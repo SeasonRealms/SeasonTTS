@@ -54,7 +54,7 @@ jobs:
               [string]$Destination
             )
 
-            $copied = New-Object System.Collections.Generic.HashSet[string]([System.StringComparer]::OrdinalIgnoreCase)
+            $copied = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
 
             foreach ($root in $Roots) {
               if (-not (Test-Path $root)) {
@@ -70,7 +70,7 @@ jobs:
               }
             }
 
-            return @($copied.ToArray() | Sort-Object)
+            return @($copied | Sort-Object)
           }
 
           function Get-LatestNvidiaRedistArchiveUrl {
