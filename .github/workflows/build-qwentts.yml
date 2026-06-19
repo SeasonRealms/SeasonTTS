@@ -1,4 +1,4 @@
-name: Build qwentts.cpp Native Libraries
+name: Build qwentts.cpp Native Libraries (SeasonRealms fork)
 
 on:
   workflow_dispatch:
@@ -17,7 +17,7 @@ on:
           - ios
           - android
       qwentts_ref:
-        description: "qwentts.cpp tag / branch / commit"
+        description: "qwentts.cpp tag / branch / commit (SeasonRealms fork)"
         required: true
         default: "master"
       ggml_ref:
@@ -33,7 +33,7 @@ permissions:
   contents: read
 
 env:
-  QWENTTS_REPO: ServeurpersoCom/qwentts.cpp
+  QWENTTS_REPO: SeasonRealms/qwentts.cpp
   GGML_REPO: ServeurpersoCom/ggml
 
 jobs:
