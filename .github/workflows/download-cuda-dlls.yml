@@ -141,7 +141,7 @@ jobs:
 
             $archiveName = Split-Path $archiveUrl -Leaf
             $archivePath = Join-Path $downloadRoot $archiveName
-            Write-Host "Downloading fallback redist for $Name: $archiveUrl"
+            Write-Host "Downloading fallback redist for ${Name}: $archiveUrl"
             Invoke-WebRequest -Uri $archiveUrl -OutFile $archivePath -UseBasicParsing
             Expand-Archive -Path $archivePath -DestinationPath $extractRoot -Force
 
