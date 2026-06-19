@@ -1,0 +1,101 @@
+name: Download CUDA Runtime DLLs for qwentts
+
+on:
+  workflow_dispatch:
+    inputs:
+      cuda_version:
+        description: "CUDA Toolkit version"
+        required: true
+        default: "13.2.0"
+      output_subdir:
+        description: "Artifact subdirectory name"
+        required: true
+        default: "cuda-runtime-win-x64"
+
+permissions:
+  contents: read
+
+jobs:
+  download-cuda-dlls:
+    runs-on: windows-2022
+    timeout-minutes: 45
+    steps:
+      - name: Install CUDA Toolkit
+        uses: Jimver/cuda-toolkit@v0.2.35
+        with:
+          cuda: "${{ github.event.inputs.cuda_version }}"
+
+      - name: Collect CUDA runtime DLLs
+        shell: pwsh
+        run: |
+          $out = Join-Path "out" "${{ github.event.inputs.output_subdir }}"
+          New-Item -ItemType Directory -Force -Path $out | Out-Null
+
+          if (-not $env:CUDA_PATH) {
+            throw "CUDA_PATH is not set after installing CUDA Toolkit."
+          }
+
+          $cudaBin = Join-Path $env:CUDA_PATH "bin"
+          if (-not (Test-Path $cudaBin)) {
+            throw "CUDA bin directory not found: $cudaBin"
+          }
+
+          # These are the Windows DLLs most commonly needed by ggml-cuda.dll.
+          $patterns = @(
+            "cudart64_*.dll",
+            "cublas64_*.dll",
+            "cublasLt64_*.dll",
+            "cufft64_*.dll",
+            "curand64_*.dll",
+            "cusparse64_*.dll",
+            "nvJitLink_*.dll"
+          )
+
+          foreach ($pattern in $patterns) {
+            $matches = Get-ChildItem $cudaBin -Filter $pattern -ErrorAction SilentlyContinue
+            if (-not $matches) {
+              Write-Warning "No files matched pattern '$pattern' in $cudaBin"
+              continue
+            }
+
+            foreach ($file in $matches) {
+              Copy-Item $file.FullName -Destination $out -Force
+              Write-Host "Copied $($file.Name)"
+            }
+          }
+
+          $requiredPatterns = @(
+            "cudart64_*.dll",
+            "cublas64_*.dll"
+          )
+
+          foreach ($requiredPattern in $requiredPatterns) {
+            $copied = Get-ChildItem $out -Filter $requiredPattern -ErrorAction SilentlyContinue
+            if (-not $copied) {
+              throw "Missing required CUDA runtime DLL for pattern '$requiredPattern'."
+            }
+          }
+
+          $manifest = Join-Path $out "README.txt"
+          @(
+            "CUDA Toolkit version: ${{ github.event.inputs.cuda_version }}",
+            "CUDA_PATH: $env:CUDA_PATH",
+            "",
+            "Files copied for qwentts/ggml-cuda runtime deployment:"
+          ) | Set-Content -Path $manifest -Encoding ascii
+
+          Get-ChildItem $out -File | Sort-Object Name | ForEach-Object {
+            Add-Content -Path $manifest -Value $_.Name -Encoding ascii
+          }
+
+          Write-Host "Collected CUDA runtime files:"
+          Get-ChildItem $out -File | Sort-Object Name | ForEach-Object {
+            Write-Host "  $($_.Name)"
+          }
+
+      - name: Upload CUDA DLL artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ github.event.inputs.output_subdir }}
+          path: out/${{ github.event.inputs.output_subdir }}/
+          if-no-files-found: error
