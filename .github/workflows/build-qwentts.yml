@@ -28,6 +28,14 @@ on:
         description: "CUDA Toolkit version (Windows/Linux, aligned with OnnxRuntimeMultiEP default)"
         required: false
         default: "12.8.1"
+      cuda_architectures:
+        description: "CUDA architectures for Windows/Linux CMake builds"
+        required: false
+        default: "75-virtual;80-real;86-real;89-real;90-virtual"
+      cuda_build_parallel:
+        description: "Parallel build jobs for CUDA builds"
+        required: false
+        default: "4"
 
 permissions:
   contents: read
@@ -43,7 +51,7 @@ jobs:
   build-windows:
     if: inputs.build_target == 'windows' || inputs.build_target == 'all'
     runs-on: windows-2022
-    timeout-minutes: 90
+    timeout-minutes: 240
     steps:
       - name: Clone qwentts.cpp
         run: git clone --depth 1 --branch "${{ github.event.inputs.qwentts_ref }}" "https://github.com/${{ env.QWENTTS_REPO }}.git" qwentts
@@ -79,11 +87,11 @@ jobs:
             -DGGML_CUDA=ON `
             -DGGML_VULKAN=ON `
             -DGGML_BACKEND_DL=ON `
-            -DCMAKE_CUDA_ARCHITECTURES="70-real;75-real;80-real;86-real;89-real;90-virtual"
+            -DCMAKE_CUDA_ARCHITECTURES="${{ github.event.inputs.cuda_architectures }}"
 
       - name: Build
         working-directory: qwentts/build
-        run: cmake --build . -j $env:NUMBER_OF_PROCESSORS
+        run: cmake --build . --parallel ${{ github.event.inputs.cuda_build_parallel }}
 
       - name: Collect artifacts
         shell: pwsh
@@ -270,7 +278,7 @@ jobs:
   build-linux:
     if: inputs.build_target == 'linux' || inputs.build_target == 'all'
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 240
     steps:
       - name: Clone qwentts.cpp
         run: git clone --depth 1 --branch "${{ github.event.inputs.qwentts_ref }}" "https://github.com/${{ env.QWENTTS_REPO }}.git" qwentts
@@ -311,12 +319,12 @@ jobs:
             -DGGML_CUDA=ON \
             -DGGML_VULKAN=ON \
             -DGGML_BACKEND_DL=ON \
-            -DCMAKE_CUDA_ARCHITECTURES="70-real;75-real;80-real;86-real;89-real;90-virtual" \
+            -DCMAKE_CUDA_ARCHITECTURES="${{ github.event.inputs.cuda_architectures }}" \
             -G Ninja
 
       - name: Build
         working-directory: qwentts/build
-        run: ninja -j $(nproc)
+        run: ninja -j ${{ github.event.inputs.cuda_build_parallel }}
 
       - name: Collect artifacts
         run: |
