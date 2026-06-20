@@ -4,9 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       cuda_version:
-        description: "CUDA Toolkit version"
+        description: "CUDA Toolkit version (aligned with OnnxRuntimeMultiEP default)"
         required: true
-        default: "13.2.0"
+        default: "12.8.1"
       output_subdir:
         description: "Artifact subdirectory name"
         required: true
