@@ -1,4 +1,4 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
 	<TargetFrameworks>net10.0-android;net10.0-ios;net10.0-maccatalyst;net10.0;net10.0-windows10.0.19041.0</TargetFrameworks>
@@ -17,6 +17,7 @@
     <PackageProjectUrl>https://github.com/SeasonRealms/SeasonTTS</PackageProjectUrl>
     <RepositoryUrl>https://github.com/SeasonRealms/SeasonTTS</RepositoryUrl>
     <RepositoryType>git</RepositoryType>
+    <Version>1.0.1</Version>
     <PackageReadmeFile>README.md</PackageReadmeFile>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
     <PackageRequireLicenseAcceptance>false</PackageRequireLicenseAcceptance>
