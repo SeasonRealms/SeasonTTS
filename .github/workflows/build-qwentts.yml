@@ -25,9 +25,9 @@ on:
         required: false
         default: "master"
       cuda_version:
-        description: "CUDA Toolkit version (Windows/Linux)"
+        description: "CUDA Toolkit version (Windows/Linux, aligned with OnnxRuntimeMultiEP default)"
         required: false
-        default: "13.2.0"
+        default: "12.8.1"
 
 permissions:
   contents: read
@@ -79,7 +79,7 @@ jobs:
             -DGGML_CUDA=ON `
             -DGGML_VULKAN=ON `
             -DGGML_BACKEND_DL=ON `
-            -DCMAKE_CUDA_ARCHITECTURES="75-virtual;80-virtual;86-real;89-real"
+            -DCMAKE_CUDA_ARCHITECTURES="70-real;75-real;80-real;86-real;89-real;90-virtual"
 
       - name: Build
         working-directory: qwentts/build
@@ -108,22 +108,154 @@ jobs:
           # future GGML operations (cufft, curand, cusparse, nvJitLink).
           # cuDNN is NOT included — qwentts.cpp is transformer-based (attention
           # + MLP), not convolution-based, so cuDNN would never be loaded.
-          if (Test-Path env:CUDA_PATH) {
-            $cudaBin = Join-Path $env:CUDA_PATH "bin"
-            if (Test-Path $cudaBin) {
-              Get-ChildItem $cudaBin -Filter "cudart64_*.dll"    | ForEach-Object { Copy-Item $_.FullName -Destination $out }
-              Get-ChildItem $cudaBin -Filter "cublas64_*.dll"    | ForEach-Object { Copy-Item $_.FullName -Destination $out }
-              Get-ChildItem $cudaBin -Filter "cublasLt64_*.dll"  | ForEach-Object { Copy-Item $_.FullName -Destination $out }
-              Get-ChildItem $cudaBin -Filter "cufft64_*.dll"     | ForEach-Object { Copy-Item $_.FullName -Destination $out }
-              Get-ChildItem $cudaBin -Filter "curand64_*.dll"    | ForEach-Object { Copy-Item $_.FullName -Destination $out }
-              Get-ChildItem $cudaBin -Filter "cusparse64_*.dll"  | ForEach-Object { Copy-Item $_.FullName -Destination $out }
-              Get-ChildItem $cudaBin -Filter "nvJitLink_*.dll"   | ForEach-Object { Copy-Item $_.FullName -Destination $out }
-              Write-Host "CUDA runtime DLLs copied from: $cudaBin"
-            }
+          if (-not $env:CUDA_PATH) {
+            throw "CUDA_PATH is not set after installing CUDA Toolkit."
           }
 
+          $cudaBin = Join-Path $env:CUDA_PATH "bin"
+          if (-not (Test-Path $cudaBin)) {
+            throw "CUDA bin directory not found: $cudaBin"
+          }
+          $cudaLib = Join-Path $env:CUDA_PATH "lib\x64"
+          $cudaSeries = ("${{ github.event.inputs.cuda_version }}" -split '\.')[0..1] -join "."
+          $searchRoots = @($cudaBin)
+          if (Test-Path $cudaLib) {
+            $searchRoots += $cudaLib
+          }
+
+          function Copy-MatchingFiles {
+            param(
+              [string[]]$Roots,
+              [string[]]$Patterns,
+              [string]$Destination
+            )
+
+            $copied = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+
+            foreach ($root in $Roots) {
+              if (-not (Test-Path $root)) {
+                continue
+              }
+
+              foreach ($pattern in $Patterns) {
+                Get-ChildItem -Path $root -Recurse -File -Filter $pattern -ErrorAction SilentlyContinue | ForEach-Object {
+                  $destPath = Join-Path $Destination $_.Name
+                  Copy-Item $_.FullName -Destination $destPath -Force
+                  $null = $copied.Add($_.Name)
+                }
+              }
+            }
+
+            return @($copied | Sort-Object)
+          }
+
+          function Get-LatestNvidiaRedistArchiveUrl {
+            param(
+              [string]$Component,
+              [string]$Series
+            )
+
+            $indexUrl = "https://developer.download.nvidia.com/compute/cuda/redist/$Component/windows-x86_64/"
+            $response = Invoke-WebRequest -Uri $indexUrl -UseBasicParsing
+            $escapedComponent = [regex]::Escape($Component)
+            $escapedSeries = [regex]::Escape($Series)
+            $regex = [regex]"$escapedComponent-windows-x86_64-($escapedSeries(?:\.\d+)+)-archive\.zip"
+
+            $archives = foreach ($match in $regex.Matches($response.Content)) {
+              [pscustomobject]@{
+                FileName = $match.Value
+                Version  = [version]$match.Groups[1].Value
+              }
+            }
+
+            $latest = $archives | Sort-Object Version -Descending | Select-Object -First 1
+            if ($null -eq $latest) {
+              return $null
+            }
+
+            return $indexUrl + $latest.FileName
+          }
+
+          function Ensure-ComponentDlls {
+            param(
+              [string]$Name,
+              [string[]]$Patterns,
+              [string]$RedistComponent,
+              [bool]$Required
+            )
+
+            $copied = Copy-MatchingFiles -Roots $searchRoots -Patterns $Patterns -Destination $out
+            if ($copied.Count -gt 0) {
+              Write-Host "$Name DLLs copied from installed toolkit: $($copied -join ', ')"
+              return
+            }
+
+            Write-Warning "No local DLLs found for $Name under: $($searchRoots -join '; ')"
+
+            if ([string]::IsNullOrWhiteSpace($RedistComponent)) {
+              if ($Required) {
+                throw "Missing required CUDA DLLs for component '$Name'."
+              }
+              return
+            }
+
+            $archiveUrl = Get-LatestNvidiaRedistArchiveUrl -Component $RedistComponent -Series $cudaSeries
+            if ([string]::IsNullOrWhiteSpace($archiveUrl)) {
+              if ($Required) {
+                throw "No NVIDIA redist archive found for component '$RedistComponent' in CUDA series $cudaSeries."
+              }
+              Write-Warning "No NVIDIA redist archive found for optional component '$RedistComponent' in CUDA series $cudaSeries."
+              return
+            }
+
+            $downloadRoot = Join-Path $env:RUNNER_TEMP "cuda-redist"
+            $extractRoot = Join-Path $downloadRoot "extract-$Name"
+            New-Item -ItemType Directory -Force -Path $downloadRoot | Out-Null
+            if (Test-Path $extractRoot) {
+              Remove-Item -Path $extractRoot -Recurse -Force
+            }
+
+            $archiveName = Split-Path $archiveUrl -Leaf
+            $archivePath = Join-Path $downloadRoot $archiveName
+            Write-Host "Downloading fallback redist for ${Name}: $archiveUrl"
+            Invoke-WebRequest -Uri $archiveUrl -OutFile $archivePath -UseBasicParsing
+            Expand-Archive -Path $archivePath -DestinationPath $extractRoot -Force
+
+            $copied = Copy-MatchingFiles -Roots @($extractRoot) -Patterns $Patterns -Destination $out
+            if ($copied.Count -gt 0) {
+              Write-Host "$Name DLLs copied from NVIDIA redist: $($copied -join ', ')"
+              return
+            }
+
+            if ($Required) {
+              throw "Missing required CUDA DLLs for component '$Name' even after downloading NVIDIA redist archive '$archiveName'."
+            }
+
+            Write-Warning "Optional component '$Name' was not found even after downloading NVIDIA redist archive '$archiveName'."
+          }
+
+          Ensure-ComponentDlls -Name "cudart" -Patterns @("cudart64_*.dll", "cudart*.dll") -RedistComponent "cuda_cudart" -Required $true
+          Ensure-ComponentDlls -Name "cublas" -Patterns @("cublas64_*.dll", "cublas*.dll", "cublasLt64_*.dll", "cublasLt*.dll") -RedistComponent "libcublas" -Required $true
+          Ensure-ComponentDlls -Name "cufft" -Patterns @("cufft64_*.dll", "cufft*.dll") -RedistComponent "libcufft" -Required $false
+          Ensure-ComponentDlls -Name "curand" -Patterns @("curand64_*.dll", "curand*.dll") -RedistComponent "libcurand" -Required $false
+          Ensure-ComponentDlls -Name "cusparse" -Patterns @("cusparse64_*.dll", "cusparse*.dll") -RedistComponent "libcusparse" -Required $false
+          Ensure-ComponentDlls -Name "nvJitLink" -Patterns @("nvJitLink_*.dll", "nvJitLink*.dll") -RedistComponent "libnvjitlink" -Required $false
+
+          $manifest = Join-Path $out "README.txt"
+          @(
+            "QWENTTS_REF: ${{ github.event.inputs.qwentts_ref }}",
+            "GGML_REF: ${{ github.event.inputs.ggml_ref }}",
+            "CUDA Toolkit version: ${{ github.event.inputs.cuda_version }}",
+            "CUDA_PATH: $env:CUDA_PATH",
+            "",
+            "Windows qwentts artifact contents:"
+          ) | Set-Content -Path $manifest -Encoding ascii
+
           Write-Host "Windows artifacts:"
-          Get-ChildItem $out | ForEach-Object { Write-Host "  $($_.Name)" }
+          Get-ChildItem $out -File | Sort-Object Name | ForEach-Object {
+            Add-Content -Path $manifest -Value $_.Name -Encoding ascii
+            Write-Host "  $($_.Name)"
+          }
 
       - name: Upload Windows artifacts
         uses: actions/upload-artifact@v4
@@ -157,15 +289,15 @@ jobs:
           cuda: "${{ github.event.inputs.cuda_version }}"
           method: "network"
           # cudart/nvrtc/nvcc follow the cuda-{name}-{ver} convention and work.
-          # cublas/nvrtc_dev were renamed in CUDA 13.x → install manually below.
+          # Install the matching 12.8 cublas/nvrtc development packages below.
           sub-packages: '["cudart", "nvrtc", "nvcc"]'
 
-      - name: Install CUDA 13.x renamed packages
+      - name: Install CUDA 12.8 extra packages
         run: |
           sudo apt-get install -y \
-            cublas13 \
-            libcublas-dev-13-2 \
-            cuda-nvrtc-dev-13-2
+            libcublas-12-8 \
+            libcublas-dev-12-8 \
+            cuda-nvrtc-dev-12-8
 
       - name: Configure CMake
         working-directory: qwentts
@@ -179,7 +311,7 @@ jobs:
             -DGGML_CUDA=ON \
             -DGGML_VULKAN=ON \
             -DGGML_BACKEND_DL=ON \
-            -DCMAKE_CUDA_ARCHITECTURES="75-virtual;80-virtual;86-real;89-real" \
+            -DCMAKE_CUDA_ARCHITECTURES="70-real;75-real;80-real;86-real;89-real;90-virtual" \
             -G Ninja
 
       - name: Build
