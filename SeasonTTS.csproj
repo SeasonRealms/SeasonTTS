@@ -1,17 +1,19 @@
-<Project Sdk="Microsoft.NET.Sdk">
+﻿<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <TargetFramework>net10.0</TargetFramework>
+	<TargetFrameworks>net10.0-android;net10.0-ios;net10.0-maccatalyst;net10.0;net10.0-windows10.0.19041.0</TargetFrameworks>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
+	  <AllowUnsafeBlocks>True</AllowUnsafeBlocks>
+	  <LangVersion>preview</LangVersion>
     <AssemblyName>SeasonTTS</AssemblyName>
     <RootNamespace>SeasonTTS</RootNamespace>
     <PackageId>SeasonTTS</PackageId>
     <Title>SeasonTTS</Title>
     <Authors>SeasonRealms</Authors>
     <Company>SeasonRealms</Company>
-    <Description>SeasonTTS is a .NET text-to-speech library for Qwen3-TTS ONNX bundles, with simple CustomVoice and CloneVoice APIs.</Description>
-    <PackageTags>tts;onnx;qwen;qwen3-tts;speech;audio;voice-cloning</PackageTags>
+    <Description>SeasonTTS is a .NET text-to-speech library for Qwen3-TTS ONNX bundles, with simple CustomVoice and CloneVoice APIs. It also wraps qwentts.cpp (Qwen3-TTS GGML) via P/Invoke, supports base, CustomVoice, CloneVoice, and VoiceDesign synthesis modes.</Description>
+    <PackageTags>tts;onnx;qwen;qwen3-tts;speech;audio;voice-cloning;ggmlvoice-design;cross-platform</PackageTags>
     <PackageProjectUrl>https://github.com/SeasonRealms/SeasonTTS</PackageProjectUrl>
     <RepositoryUrl>https://github.com/SeasonRealms/SeasonTTS</RepositoryUrl>
     <RepositoryType>git</RepositoryType>
@@ -20,18 +22,47 @@
     <PackageRequireLicenseAcceptance>false</PackageRequireLicenseAcceptance>
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
     <NoWarn>$(NoWarn);CS1591;CS1572;CS1573</NoWarn>
+
+	  <TargetFrameworks>net10.0-android;net10.0-ios;net10.0-maccatalyst;net10.0;net10.0-browser</TargetFrameworks>
+	  <TargetFrameworks Condition="$([MSBuild]::IsOSPlatform('windows'))">$(TargetFrameworks);net10.0-windows10.0.19041.0</TargetFrameworks>
+
+	  <IsAndroid Condition="$(TargetFramework.Contains('android'))">true</IsAndroid>
+	  <IsIOS Condition="$(TargetFramework.Contains('ios'))">true</IsIOS>
+	  <IsMacCatalyst Condition="$(TargetFramework.Contains('maccatalyst'))">true</IsMacCatalyst>
+	  <IsWindows Condition="$(TargetFramework.Contains('windows'))">true</IsWindows>
+
+	  <IsLinux Condition="'$(TargetFramework)' == 'net10.0'">true</IsLinux>
+	  <IsBrowser Condition="$(TargetFramework.Contains('browser'))">true</IsBrowser>
+
+	  <IsApple Condition="'$(IsIOS)' == 'true' or '$(IsMacCatalyst)' == 'true'">true</IsApple>
+	  <IsUnixLike Condition="'$(IsAndroid)' == 'true' or '$(IsLinux)' == 'true'">true</IsUnixLike>
+
+	  <SupportedOSPlatformVersion Condition="'$(IsIOS)' == 'true'">15.0</SupportedOSPlatformVersion>
+	  <SupportedOSPlatformVersion Condition="'$(IsMacCatalyst)' == 'true'">15.0</SupportedOSPlatformVersion>
+	  <SupportedOSPlatformVersion Condition="'$(IsAndroid)' == 'true'">29.0</SupportedOSPlatformVersion>
+	  <SupportedOSPlatformVersion Condition="'$(IsWindows)' == 'true'">10.0.17763.0</SupportedOSPlatformVersion>
+	  <TargetPlatformMinVersion Condition="'$(IsWindows)' == 'true'">10.0.17763.0</TargetPlatformMinVersion>
+
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="Microsoft.Extensions.DependencyInjection.Abstractions" Version="10.0.8" />
-    <PackageReference Include="Microsoft.ML.OnnxRuntime" Version="1.26.0" />
+    <PackageReference Include="Microsoft.Extensions.DependencyInjection.Abstractions" Version="10.0.9" />
+	<PackageReference Include="Microsoft.ML.OnnxRuntime.Managed" Version="1.26.0" />
     <PackageReference Include="Microsoft.ML.Tokenizers" Version="2.0.0" />
+	  <None Include="README.md" Pack="true" PackagePath="\" />
+	  <None Include="LICENSE" Pack="true" PackagePath="\" />
+	  <None Include="THIRD-PARTY-NOTICES.md" Pack="true" PackagePath="\" />
   </ItemGroup>
 
-  <ItemGroup>
-    <None Include="README.md" Pack="true" PackagePath="\" />
-    <None Include="LICENSE" Pack="true" PackagePath="\" />
-    <None Include="THIRD-PARTY-NOTICES.md" Pack="true" PackagePath="\" />
-  </ItemGroup>
+	<!-- Windows: copy DLLs directly to output root (next to the .exe/.dll) -->
+	<ItemGroup Condition="'$(IsWindows)' == 'true'">
+		<Content Include="runtimes\win-x64\native\*" Condition="Exists('runtimes\win-x64\native')">
+			<CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+			<Link>%(Filename)%(Extension)</Link>
+		</Content>
+	</ItemGroup>
+	<ItemGroup>
+	  <Folder Include="GGML\" />
+	</ItemGroup>
 
 </Project>
