@@ -3,37 +3,32 @@ name: Build qwentts.cpp Native Libraries (SeasonRealms fork)
 on:
   workflow_dispatch:
     inputs:
-      build_target:
-        description: "Platform(s) to build"
+      configuration:
+        description: "CMake build type"
         required: true
         type: choice
-        default: "all"
+        default: "Release"
         options:
-          - all
-          - windows
-          - linux
-          - macos
-          - maccatalyst
-          - ios
-          - android
+          - Release
+          - Debug
       qwentts_ref:
         description: "qwentts.cpp tag / branch / commit (SeasonRealms fork)"
         required: true
         default: "master"
       ggml_ref:
-        description: "ggml fork tag / branch / commit"
+        description: "SeasonRealms/ggml tag / branch / commit"
         required: false
         default: "master"
       cuda_version:
-        description: "CUDA Toolkit version (Windows/Linux, aligned with OnnxRuntimeMultiEP default)"
+        description: "CUDA Toolkit version for the Windows build"
         required: false
         default: "12.8.1"
       cuda_architectures:
-        description: "CUDA architectures for Windows/Linux CMake builds"
+        description: "CUDA architectures for the Windows CMake build"
         required: false
         default: "75-virtual;80-real;86-real;89-real;90-virtual"
-      cuda_build_parallel:
-        description: "Parallel build jobs for CUDA builds"
+      build_parallel:
+        description: "Parallel build jobs"
         required: false
         default: "4"
 
@@ -42,14 +37,10 @@ permissions:
 
 env:
   QWENTTS_REPO: SeasonRealms/qwentts.cpp
-  GGML_REPO: ServeurpersoCom/ggml
+  GGML_REPO: SeasonRealms/ggml
 
 jobs:
-  # ══════════════════════════════════════════════════════════════════
-  #  Windows x64 — CPU + CUDA + Vulkan (DL mode)
-  # ══════════════════════════════════════════════════════════════════
   build-windows:
-    if: inputs.build_target == 'windows' || inputs.build_target == 'all'
     runs-on: windows-2022
     timeout-minutes: 240
     steps:
@@ -78,20 +69,30 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force -Path build | Out-Null
           Set-Location build
-          cmake .. `
-            -G Ninja `
-            -DCMAKE_BUILD_TYPE=Release `
-            -DBUILD_SHARED_LIBS=ON `
-            -DQWEN_SHARED=ON `
-            -DGGML_CPU_ALL_VARIANTS=ON `
-            -DGGML_CUDA=ON `
-            -DGGML_VULKAN=ON `
-            -DGGML_BACKEND_DL=ON `
-            -DCMAKE_CUDA_ARCHITECTURES="${{ github.event.inputs.cuda_architectures }}"
+
+          $cmakeArgs = @(
+            '..',
+            '-G', 'Ninja',
+            "-DCMAKE_BUILD_TYPE=${{ github.event.inputs.configuration }}",
+            '-DBUILD_SHARED_LIBS=ON',
+            '-DQWEN_SHARED=ON',
+            '-DGGML_NATIVE=OFF',
+            '-DGGML_CPU_ALL_VARIANTS=OFF',
+            '-DGGML_AVX2=ON',
+            '-DGGML_CUDA=ON',
+            '-DGGML_VULKAN=ON',
+            '-DGGML_BACKEND_DL=ON',
+            '-DCMAKE_CUDA_ARCHITECTURES=${{ github.event.inputs.cuda_architectures }}'
+          )
+
+          Write-Host "Running: cmake $($cmakeArgs -join ' ')"
+          & cmake @cmakeArgs
 
       - name: Build
         working-directory: qwentts/build
-        run: cmake --build . --parallel ${{ github.event.inputs.cuda_build_parallel }}
+        shell: pwsh
+        run: |
+          cmake --build . --config "${{ github.event.inputs.configuration }}" --parallel "${{ github.event.inputs.build_parallel }}"
 
       - name: Collect artifacts
         shell: pwsh
@@ -99,12 +100,53 @@ jobs:
           $out = "out/runtimes/win-x64/native"
           New-Item -ItemType Directory -Force -Path $out | Out-Null
 
-          Copy-Item qwentts/build/qwen.dll        -Destination $out -ErrorAction SilentlyContinue
-          Copy-Item qwentts/build/qwen.lib        -Destination $out -ErrorAction SilentlyContinue
-          # qwen.dll directly depends on ggml.dll and ggml-base.dll in addition to
-          # the backend-specific ggml-*.dll files, so collect every Windows ggml DLL.
-          Get-ChildItem qwentts/build -Filter "ggml*.dll" | ForEach-Object {
-            Copy-Item $_.FullName -Destination $out
+          Copy-Item qwentts/build/qwen.dll -Destination $out -ErrorAction SilentlyContinue
+          Copy-Item qwentts/build/qwen.lib -Destination $out -ErrorAction SilentlyContinue
+
+          $ggmlDlls = Get-ChildItem qwentts/build -Recurse -File -Filter "ggml*.dll"
+          foreach ($dll in $ggmlDlls) {
+            Copy-Item $dll.FullName -Destination $out -Force
+          }
+
+          $cpuCandidates = @(
+            "ggml-cpu.dll",
+            "ggml-cpu-avx2.dll",
+            "ggml-cpu-x64.dll",
+            "ggml-cpu-haswell.dll"
+          )
+          $cpuSource = $null
+          foreach ($candidate in $cpuCandidates) {
+            $match = Get-Item (Join-Path $out $candidate) -ErrorAction SilentlyContinue
+            if ($match) {
+              $cpuSource = $match.FullName
+              break
+            }
+          }
+
+          if (-not $cpuSource) {
+            $cpuSource = (Get-ChildItem $out -File | Where-Object { $_.Name -like 'ggml-cpu*.dll' } | Select-Object -First 1).FullName
+          }
+
+          if (-not $cpuSource) {
+            throw "Unable to locate a CPU GGML backend DLL in the build output."
+          }
+
+          if ((Split-Path $cpuSource -Leaf) -ne "ggml-cpu.dll") {
+            Copy-Item $cpuSource -Destination (Join-Path $out "ggml-cpu.dll") -Force
+          }
+
+          $requiredGgmlDlls = @(
+            "ggml.dll",
+            "ggml-base.dll",
+            "ggml-cpu.dll",
+            "ggml-cuda.dll",
+            "ggml-vulkan.dll"
+          )
+
+          foreach ($name in $requiredGgmlDlls) {
+            if (-not (Test-Path (Join-Path $out $name))) {
+              throw "Required GGML runtime is missing: $name"
+            }
           }
 
           # Public header for binding consumers
@@ -251,12 +293,16 @@ jobs:
 
           $manifest = Join-Path $out "README.txt"
           @(
+            "Platform: windows-x64",
+            "Configuration: ${{ github.event.inputs.configuration }}",
             "QWENTTS_REF: ${{ github.event.inputs.qwentts_ref }}",
+            "GGML_REPO: ${{ env.GGML_REPO }}",
             "GGML_REF: ${{ github.event.inputs.ggml_ref }}",
             "CUDA Toolkit version: ${{ github.event.inputs.cuda_version }}",
             "CUDA_PATH: $env:CUDA_PATH",
             "",
-            "Windows qwentts artifact contents:"
+            "Windows qwentts artifact contents:",
+            "Expected shared GGML backends: ggml-cpu.dll, ggml-cuda.dll, ggml-vulkan.dll"
           ) | Set-Content -Path $manifest -Encoding ascii
 
           Write-Host "Windows artifacts:"
@@ -268,259 +314,6 @@ jobs:
       - name: Upload Windows artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: qwentts-win-x64
+          name: qwentts-win-x64-${{ github.event.inputs.configuration }}
           path: out/runtimes/win-x64/native/
-          if-no-files-found: error
-
-  # ══════════════════════════════════════════════════════════════════
-  #  Linux x64 — CPU + CUDA + Vulkan (DL mode)
-  # ══════════════════════════════════════════════════════════════════
-  build-linux:
-    if: inputs.build_target == 'linux' || inputs.build_target == 'all'
-    runs-on: ubuntu-latest
-    timeout-minutes: 240
-    steps:
-      - name: Clone qwentts.cpp
-        run: git clone --depth 1 --branch "${{ github.event.inputs.qwentts_ref }}" "https://github.com/${{ env.QWENTTS_REPO }}.git" qwentts
-
-      - name: Clone ggml fork
-        run: git clone --depth 1 --branch "${{ github.event.inputs.ggml_ref }}" "https://github.com/${{ env.GGML_REPO }}.git" qwentts/ggml
-
-      - name: Install system dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y ninja-build libvulkan-dev glslc glslang-tools vulkan-tools spirv-headers
-
-      - name: Install CUDA Toolkit
-        uses: Jimver/cuda-toolkit@v0.2.35
-        with:
-          cuda: "${{ github.event.inputs.cuda_version }}"
-          method: "network"
-          # cudart/nvrtc/nvcc follow the cuda-{name}-{ver} convention and work.
-          # Install the matching 12.8 cublas/nvrtc development packages below.
-          sub-packages: '["cudart", "nvrtc", "nvcc"]'
-
-      - name: Install CUDA 12.8 extra packages
-        run: |
-          sudo apt-get install -y \
-            libcublas-12-8 \
-            libcublas-dev-12-8 \
-            cuda-nvrtc-dev-12-8
-
-      - name: Configure CMake
-        working-directory: qwentts
-        run: |
-          mkdir build && cd build
-          cmake .. \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DBUILD_SHARED_LIBS=ON \
-            -DQWEN_SHARED=ON \
-            -DGGML_CPU_ALL_VARIANTS=ON \
-            -DGGML_CUDA=ON \
-            -DGGML_VULKAN=ON \
-            -DGGML_BACKEND_DL=ON \
-            -DCMAKE_CUDA_ARCHITECTURES="${{ github.event.inputs.cuda_architectures }}" \
-            -G Ninja
-
-      - name: Build
-        working-directory: qwentts/build
-        run: ninja -j ${{ github.event.inputs.cuda_build_parallel }}
-
-      - name: Collect artifacts
-        run: |
-          out="out/runtimes/linux-x64/native"
-          mkdir -p "$out"
-          cp qwentts/build/libqwen.so     "$out/" 2>/dev/null || true
-          cp qwentts/build/libggml-*.so   "$out/" 2>/dev/null || true
-          cp qwentts/src/qwen.h           "$out/"
-          echo "Linux artifacts:"
-          ls -la "$out/"
-
-      - name: Upload Linux artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: qwentts-linux-x64
-          path: out/runtimes/linux-x64/native/
-          if-no-files-found: error
-
-  # ══════════════════════════════════════════════════════════════════
-  #  macOS ARM64 — Metal backend (shared for desktop + MacCatalyst)
-  # ══════════════════════════════════════════════════════════════════
-  build-macos:
-    if: inputs.build_target == 'macos' || inputs.build_target == 'maccatalyst' || inputs.build_target == 'all'
-    runs-on: macos-latest
-    timeout-minutes: 90
-    strategy:
-      matrix:
-        include:
-          - rid: osx-arm64
-            deployment_target: "13.0"
-            platform: macos
-          - rid: maccatalyst-arm64
-            deployment_target: "15.0"
-            platform: maccatalyst
-    steps:
-      - name: Clone qwentts.cpp
-        run: git clone --depth 1 --branch "${{ github.event.inputs.qwentts_ref }}" "https://github.com/${{ env.QWENTTS_REPO }}.git" qwentts
-
-      - name: Clone ggml fork
-        run: git clone --depth 1 --branch "${{ github.event.inputs.ggml_ref }}" "https://github.com/${{ env.GGML_REPO }}.git" qwentts/ggml
-
-      - name: Configure CMake
-        if: inputs.build_target == matrix.platform || inputs.build_target == 'all'
-        working-directory: qwentts
-        run: |
-          mkdir build && cd build
-          cmake .. \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DQWEN_SHARED=ON \
-            -DGGML_METAL=ON \
-            -DGGML_CPU_ALL_VARIANTS=ON \
-            -DCMAKE_OSX_ARCHITECTURES=arm64 \
-            -DCMAKE_OSX_DEPLOYMENT_TARGET=${{ matrix.deployment_target }} \
-            -G Ninja
-
-      - name: Build
-        if: inputs.build_target == matrix.platform || inputs.build_target == 'all'
-        working-directory: qwentts/build
-        run: ninja -j $(sysctl -n hw.logicalcpu)
-
-      - name: Collect artifacts
-        if: inputs.build_target == matrix.platform || inputs.build_target == 'all'
-        run: |
-          out="out/runtimes/${{ matrix.rid }}/native"
-          mkdir -p "$out"
-          cp qwentts/build/libqwen.dylib     "$out/" 2>/dev/null || true
-          cp qwentts/build/libggml-metal.dylib "$out/" 2>/dev/null || true
-          cp qwentts/build/libggml-cpu.dylib  "$out/" 2>/dev/null || true
-          cp qwentts/src/qwen.h              "$out/"
-          echo "${{ matrix.rid }} artifacts:"
-          ls -la "$out/"
-
-      - name: Upload macOS artifacts
-        if: inputs.build_target == matrix.platform || inputs.build_target == 'all'
-        uses: actions/upload-artifact@v4
-        with:
-          name: qwentts-${{ matrix.rid }}
-          path: out/runtimes/${{ matrix.rid }}/native/
-          if-no-files-found: error
-
-  # ══════════════════════════════════════════════════════════════════
-  #  iOS ARM64 — Metal backend, static library
-  # ══════════════════════════════════════════════════════════════════
-  build-ios:
-    if: inputs.build_target == 'ios' || inputs.build_target == 'all'
-    runs-on: macos-latest
-    timeout-minutes: 90
-    steps:
-      - name: Clone qwentts.cpp
-        run: git clone --depth 1 --branch "${{ github.event.inputs.qwentts_ref }}" "https://github.com/${{ env.QWENTTS_REPO }}.git" qwentts
-
-      - name: Clone ggml fork
-        run: git clone --depth 1 --branch "${{ github.event.inputs.ggml_ref }}" "https://github.com/${{ env.GGML_REPO }}.git" qwentts/ggml
-
-      - name: Configure CMake (iOS static)
-        working-directory: qwentts
-        run: |
-          mkdir build-ios && cd build-ios
-          cmake .. \
-            -DCMAKE_SYSTEM_NAME=iOS \
-            -DCMAKE_OSX_ARCHITECTURES=arm64 \
-            -DCMAKE_OSX_DEPLOYMENT_TARGET=15.0 \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DQWEN_SHARED=OFF \
-            -DGGML_METAL=ON \
-            -DGGML_CPU_ALL_VARIANTS=ON \
-            -G Xcode
-
-      - name: Build
-        working-directory: qwentts/build-ios
-        run: |
-          cmake --build . --config Release -- -sdk iphoneos -arch arm64
-
-      - name: Collect artifacts
-        run: |
-          out="out/runtimes/ios-arm64/native"
-          mkdir -p "$out"
-
-          # Static libraries — Xcode places them under Release-iphoneos/
-          cp qwentts/build-ios/Release-iphoneos/libqwen-core.a  "$out/" 2>/dev/null || true
-          cp qwentts/build-ios/Release-iphoneos/libggml.a       "$out/" 2>/dev/null || true
-          cp qwentts/build-ios/Release-iphoneos/libggml-metal.a "$out/" 2>/dev/null || true
-
-          # Fallback: try flat build dir (Ninja generator would put them here)
-          cp qwentts/build-ios/libqwen-core.a  "$out/" 2>/dev/null || true
-          cp qwentts/build-ios/libggml.a       "$out/" 2>/dev/null || true
-          cp qwentts/build-ios/libggml-metal.a "$out/" 2>/dev/null || true
-
-          cp qwentts/src/qwen.h "$out/"
-          echo "iOS artifacts:"
-          ls -la "$out/"
-
-      - name: Upload iOS artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: qwentts-ios-arm64
-          path: out/runtimes/ios-arm64/native/
-          if-no-files-found: error
-
-  # ══════════════════════════════════════════════════════════════════
-  #  Android ARM64 — CPU + Vulkan (DL mode)
-  # ══════════════════════════════════════════════════════════════════
-  build-android:
-    if: inputs.build_target == 'android' || inputs.build_target == 'all'
-    runs-on: ubuntu-latest
-    timeout-minutes: 120
-    strategy:
-      matrix:
-        abi: [arm64-v8a]
-    steps:
-      - name: Clone qwentts.cpp
-        run: git clone --depth 1 --branch "${{ github.event.inputs.qwentts_ref }}" "https://github.com/${{ env.QWENTTS_REPO }}.git" qwentts
-
-      - name: Clone ggml fork
-        run: git clone --depth 1 --branch "${{ github.event.inputs.ggml_ref }}" "https://github.com/${{ env.GGML_REPO }}.git" qwentts/ggml
-
-      - name: Setup Android NDK
-        uses: nttld/setup-ndk@v1
-        with:
-          ndk-version: r27c
-
-      - name: Configure CMake
-        working-directory: qwentts
-        run: |
-          mkdir build-android && cd build-android
-          cmake .. \
-            -DCMAKE_SYSTEM_NAME=Android \
-            -DCMAKE_ANDROID_ARCH_ABI=${{ matrix.abi }} \
-            -DCMAKE_ANDROID_NDK=$ANDROID_NDK_HOME \
-            -DCMAKE_ANDROID_API=26 \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DBUILD_SHARED_LIBS=ON \
-            -DQWEN_SHARED=ON \
-            -DGGML_VULKAN=ON \
-            -DGGML_CPU_ALL_VARIANTS=ON \
-            -DGGML_BACKEND_DL=ON \
-            -G Ninja
-
-      - name: Build
-        working-directory: qwentts/build-android
-        run: ninja -j $(nproc)
-
-      - name: Collect artifacts
-        run: |
-          out="out/runtimes/android-${{ matrix.abi }}/native"
-          mkdir -p "$out"
-          cp qwentts/build-android/libqwen.so        "$out/" 2>/dev/null || true
-          cp qwentts/build-android/libggml-cpu.so    "$out/" 2>/dev/null || true
-          cp qwentts/build-android/libggml-vulkan.so "$out/" 2>/dev/null || true
-          cp qwentts/src/qwen.h                      "$out/"
-          echo "Android (${{ matrix.abi }}) artifacts:"
-          ls -la "$out/"
-
-      - name: Upload Android artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: qwentts-android-${{ matrix.abi }}
-          path: out/runtimes/android-${{ matrix.abi }}/native/
           if-no-files-found: error
