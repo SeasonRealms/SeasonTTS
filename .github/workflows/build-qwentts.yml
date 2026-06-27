@@ -73,15 +73,21 @@ jobs:
           $cmakeArgs = @(
             '..',
             '-G', 'Ninja',
+            '-DCMAKE_C_COMPILER=cl.exe',
+            '-DCMAKE_CXX_COMPILER=cl.exe',
             "-DCMAKE_BUILD_TYPE=${{ github.event.inputs.configuration }}",
+            '-DCMAKE_CXX_FLAGS=/bigobj',
             '-DBUILD_SHARED_LIBS=ON',
             '-DQWEN_SHARED=ON',
+            '-DGGML_BUILD_TESTS=OFF',
+            '-DGGML_BUILD_EXAMPLES=OFF',
             '-DGGML_NATIVE=OFF',
-            '-DGGML_CPU_ALL_VARIANTS=OFF',
-            '-DGGML_AVX2=ON',
+            '-DGGML_CPU_ALL_VARIANTS=ON',
             '-DGGML_CUDA=ON',
             '-DGGML_VULKAN=ON',
             '-DGGML_BACKEND_DL=ON',
+            '-DGGML_CUDA_CUB_3DOT2=ON',
+            '-DCMAKE_CUDA_FLAGS=-Xcudafe "--diag_suppress=177" -Xcudafe "--diag_suppress=550"',
             '-DCMAKE_CUDA_ARCHITECTURES=${{ github.event.inputs.cuda_architectures }}'
           )
 
@@ -108,37 +114,9 @@ jobs:
             Copy-Item $dll.FullName -Destination $out -Force
           }
 
-          $cpuCandidates = @(
-            "ggml-cpu.dll",
-            "ggml-cpu-avx2.dll",
-            "ggml-cpu-x64.dll",
-            "ggml-cpu-haswell.dll"
-          )
-          $cpuSource = $null
-          foreach ($candidate in $cpuCandidates) {
-            $match = Get-Item (Join-Path $out $candidate) -ErrorAction SilentlyContinue
-            if ($match) {
-              $cpuSource = $match.FullName
-              break
-            }
-          }
-
-          if (-not $cpuSource) {
-            $cpuSource = (Get-ChildItem $out -File | Where-Object { $_.Name -like 'ggml-cpu*.dll' } | Select-Object -First 1).FullName
-          }
-
-          if (-not $cpuSource) {
-            throw "Unable to locate a CPU GGML backend DLL in the build output."
-          }
-
-          if ((Split-Path $cpuSource -Leaf) -ne "ggml-cpu.dll") {
-            Copy-Item $cpuSource -Destination (Join-Path $out "ggml-cpu.dll") -Force
-          }
-
           $requiredGgmlDlls = @(
             "ggml.dll",
             "ggml-base.dll",
-            "ggml-cpu.dll",
             "ggml-cuda.dll",
             "ggml-vulkan.dll"
           )
@@ -147,6 +125,11 @@ jobs:
             if (-not (Test-Path (Join-Path $out $name))) {
               throw "Required GGML runtime is missing: $name"
             }
+          }
+
+          $cpuBackends = Get-ChildItem $out -File | Where-Object { $_.Name -like 'ggml-cpu*.dll' } | Sort-Object Name
+          if ($cpuBackends.Count -eq 0) {
+            throw "No CPU GGML backend variants were produced."
           }
 
           # Public header for binding consumers
@@ -300,10 +283,20 @@ jobs:
             "GGML_REF: ${{ github.event.inputs.ggml_ref }}",
             "CUDA Toolkit version: ${{ github.event.inputs.cuda_version }}",
             "CUDA_PATH: $env:CUDA_PATH",
+            "Enabled backends: cpu-all-variants, cuda12, vulkan",
             "",
             "Windows qwentts artifact contents:",
-            "Expected shared GGML backends: ggml-cpu.dll, ggml-cuda.dll, ggml-vulkan.dll"
+            "CPU uses GGML_CPU_ALL_VARIANTS with GGML_BACKEND_DL so one runtime can expose multiple x86 CPU variants and let ggml choose the best supported backend at runtime.",
+            "",
+            "CPU backend DLLs:"
           ) | Set-Content -Path $manifest -Encoding ascii
+
+          $cpuBackends | ForEach-Object {
+            Add-Content -Path $manifest -Value $_.Name -Encoding ascii
+          }
+
+          Add-Content -Path $manifest -Value "" -Encoding ascii
+          Add-Content -Path $manifest -Value "Artifact contents:" -Encoding ascii
 
           Write-Host "Windows artifacts:"
           Get-ChildItem $out -File | Sort-Object Name | ForEach-Object {
