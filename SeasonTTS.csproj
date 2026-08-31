@@ -1,4 +1,4 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
     <ImplicitUsings>enable</ImplicitUsings>
@@ -16,7 +16,7 @@
     <PackageProjectUrl>https://github.com/SeasonRealms/SeasonTTS</PackageProjectUrl>
     <RepositoryUrl>https://github.com/SeasonRealms/SeasonTTS</RepositoryUrl>
     <RepositoryType>git</RepositoryType>
-    <Version>1.2.0</Version>
+    <Version>1.2.1</Version>
     <PackageReadmeFile>README.md</PackageReadmeFile>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
     <PackageRequireLicenseAcceptance>false</PackageRequireLicenseAcceptance>
@@ -52,6 +52,8 @@
 	  <None Include="README.md" Pack="true" PackagePath="\" />
 	  <None Include="LICENSE" Pack="true" PackagePath="\" />
 	  <None Include="THIRD-PARTY-NOTICES.md" Pack="true" PackagePath="\" />
+
+	  <None Include="runtimes\win-x64\native\*" Pack="true" PackagePath="runtimes/win-x64/native/" Condition="Exists('runtimes\win-x64\native')" />
 
 	  <ProjectReference Include="..\SeasonGGML\SeasonGGML.csproj" />
   </ItemGroup>
