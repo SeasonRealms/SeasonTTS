@@ -1,13 +1,12 @@
-<Project Sdk="Microsoft.NET.Sdk">
+﻿<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-	<TargetFrameworks>net10.0-android;net10.0-ios;net10.0-maccatalyst;net10.0;net10.0-windows10.0.19041.0</TargetFrameworks>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
 	  <AllowUnsafeBlocks>True</AllowUnsafeBlocks>
 	  <LangVersion>preview</LangVersion>
     <AssemblyName>SeasonTTS</AssemblyName>
-    <RootNamespace>SeasonTTS</RootNamespace>
+    <RootNamespace>Season.TTS</RootNamespace>
     <PackageId>SeasonTTS</PackageId>
     <Title>SeasonTTS</Title>
     <Authors>SeasonRealms</Authors>
@@ -17,7 +16,7 @@
     <PackageProjectUrl>https://github.com/SeasonRealms/SeasonTTS</PackageProjectUrl>
     <RepositoryUrl>https://github.com/SeasonRealms/SeasonTTS</RepositoryUrl>
     <RepositoryType>git</RepositoryType>
-    <Version>1.0.1</Version>
+    <Version>1.2.0</Version>
     <PackageReadmeFile>README.md</PackageReadmeFile>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
     <PackageRequireLicenseAcceptance>false</PackageRequireLicenseAcceptance>
@@ -53,6 +52,8 @@
 	  <None Include="README.md" Pack="true" PackagePath="\" />
 	  <None Include="LICENSE" Pack="true" PackagePath="\" />
 	  <None Include="THIRD-PARTY-NOTICES.md" Pack="true" PackagePath="\" />
+
+	  <ProjectReference Include="..\SeasonGGML\SeasonGGML.csproj" />
   </ItemGroup>
 
 	<!-- Windows: copy DLLs directly to output root (next to the .exe/.dll) -->
@@ -60,10 +61,9 @@
 		<Content Include="runtimes\win-x64\native\*" Condition="Exists('runtimes\win-x64\native')">
 			<CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
 			<Link>%(Filename)%(Extension)</Link>
+			<Pack>true</Pack>
+			<PackagePath>runtimes/%(RecursiveDir)%(Filename)%(Extension)</PackagePath>
 		</Content>
-	</ItemGroup>
-	<ItemGroup>
-	  <Folder Include="GGML\" />
 	</ItemGroup>
 
 </Project>

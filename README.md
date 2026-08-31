@@ -13,6 +13,8 @@ Supports Windows, Linux, macOS, Android, iOS, and MacCatalyst. SeasonTTS is an i
 - ONNX namespace: `SeasonTTS.ONNX` (classes: `CustomVoice`, `CloneVoice`)
 - GGML namespace: `SeasonTTS.GGML` (class: `QwenEngine`)
 - Repository: [SeasonRealms/SeasonTTS](https://github.com/SeasonRealms/SeasonTTS)
+- Models ONNX: https://huggingface.co/SeasonEngine/Qwen3-TTS
+- Models GGML: https://huggingface.co/Serveurperso/Qwen3-TTS-GGUF
 
 ## Origin
 

@@ -3,7 +3,7 @@
 // Licensed under the MIT License.
 // https://github.com/SeasonRealms/SeasonTTS
 
-namespace SeasonTTS;
+namespace Season.TTS;
 
 public enum TTSMode
 {
