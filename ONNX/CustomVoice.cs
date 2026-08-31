@@ -5,7 +5,7 @@
 
 using ElBruno.QwenTTS.Core;
 
-namespace SeasonTTS.ONNX;
+namespace Season.TTS.ONNX;
 
 public class CustomVoice : IDisposable
 {
@@ -13,7 +13,7 @@ public class CustomVoice : IDisposable
 
     public static readonly QwenVoicePreset DefaultVoice = QwenVoicePreset.Ryan;
 
-    readonly string model;
+    readonly string? model;
     readonly Func<SessionOptions>? sessionOptionsFactory;
     readonly Func<SessionOptions>? vocoderSessionOptionsFactory;
 
@@ -34,6 +34,52 @@ public class CustomVoice : IDisposable
         this.vocoderSessionOptionsFactory = vocoderSessionOptionsFactory;
     }
 
+    CustomVoice(
+        Func<SessionOptions>? sessionOptionsFactory,
+        Func<SessionOptions>? vocoderSessionOptionsFactory)
+    {
+        model = null;
+        this.sessionOptionsFactory = sessionOptionsFactory;
+        this.vocoderSessionOptionsFactory = vocoderSessionOptionsFactory;
+    }
+
+    /// <summary>
+    /// Creates a CustomVoice instance from explicit model file paths. The
+    /// embeddings are read from the given embeddings.bin container; no files
+    /// are copied.
+    /// </summary>
+    public static CustomVoice FromFiles(
+        string vocabPath,
+        string mergesPath,
+        string embeddingsBinPath,
+        string talkerPrefillPath,
+        string talkerDecodePath,
+        string codePredictorPath,
+        string vocoderPath,
+        Func<SessionOptions>? sessionOptionsFactory = null,
+        Func<SessionOptions>? vocoderSessionOptionsFactory = null)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(vocabPath);
+        ArgumentException.ThrowIfNullOrWhiteSpace(mergesPath);
+        ArgumentException.ThrowIfNullOrWhiteSpace(embeddingsBinPath);
+        ArgumentException.ThrowIfNullOrWhiteSpace(talkerPrefillPath);
+        ArgumentException.ThrowIfNullOrWhiteSpace(talkerDecodePath);
+        ArgumentException.ThrowIfNullOrWhiteSpace(codePredictorPath);
+        ArgumentException.ThrowIfNullOrWhiteSpace(vocoderPath);
+
+        if (!File.Exists(embeddingsBinPath))
+            throw new FileNotFoundException("embeddings.bin not found.", embeddingsBinPath);
+
+        var embeddingsDir = Path.GetDirectoryName(Path.GetFullPath(embeddingsBinPath)) ?? string.Empty;
+
+        var voice = new CustomVoice(sessionOptionsFactory, vocoderSessionOptionsFactory);
+        voice._tokenizer = new TextTokenizer(vocabPath, mergesPath);
+        voice._embeddings = new EmbeddingStore(embeddingsDir, configPath: null);
+        voice._languageModel = new LanguageModel(talkerPrefillPath, talkerDecodePath, codePredictorPath, voice._embeddings, sessionOptionsFactory);
+        voice._vocoder = new Vocoder(vocoderPath, vocoderSessionOptionsFactory ?? sessionOptionsFactory);
+        return voice;
+    }
+
     public Task Initialize(CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
@@ -46,14 +92,14 @@ public class CustomVoice : IDisposable
         if (_tokenizer != null)
             return;
 
-        var tokenizerDir = Path.Combine(model, "tokenizer");
-        var embeddingsDir = Path.Combine(model, "embeddings");
+        var tokenizerDir = Path.Combine(model!, "tokenizer");
+        var embeddingsDir = Path.Combine(model!, "embeddings");
         var configPath = Path.Combine(embeddingsDir, "config.json");
 
         _tokenizer = new TextTokenizer(tokenizerDir);
         _embeddings = new EmbeddingStore(embeddingsDir, configPath);
-        _languageModel = new LanguageModel(model, _embeddings, sessionOptionsFactory);
-        _vocoder = new Vocoder(Path.Combine(model, "vocoder.onnx"), vocoderSessionOptionsFactory ?? sessionOptionsFactory);
+        _languageModel = new LanguageModel(model!, _embeddings, sessionOptionsFactory);
+        _vocoder = new Vocoder(Path.Combine(model!, "vocoder.onnx"), vocoderSessionOptionsFactory ?? sessionOptionsFactory);
     }
 
     public async Task<byte[]> Generate(        
@@ -81,10 +127,18 @@ public class CustomVoice : IDisposable
 
             return await File.ReadAllBytesAsync(tempPath, cancellationToken);
         }
+        catch (Exception ex)
+        {
+            Debug.WriteLine(ex);
+
+            throw ex;
+        }
         finally
         {
             try { File.Delete(tempPath); } catch { }
         }
+
+        return null;
     }
 
     /// <summary>Available speaker names from the model.</summary>

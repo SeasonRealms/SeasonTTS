@@ -6,14 +6,15 @@
 using ElBruno.QwenTTS.Core;
 using ElBruno.QwenTTS.VoiceCloning;
 
-namespace SeasonTTS.ONNX;
+namespace Season.TTS.ONNX;
 
 public class CloneVoice : IDisposable
 {
     public const string DefaultLanguage = "auto";
 
-    readonly string model;
+    readonly string? model;
     readonly Func<SessionOptions>? sessionOptionsFactory;
+    readonly Func<SessionOptions>? vocoderSessionOptionsFactory;
     TextTokenizer? tokenizer;
     EmbeddingStore? embeddings;
     LanguageModel? languageModel;
@@ -29,6 +30,62 @@ public class CloneVoice : IDisposable
         this.sessionOptionsFactory = sessionOptionsFactory;
     }
 
+    CloneVoice(
+        Func<SessionOptions>? sessionOptionsFactory,
+        Func<SessionOptions>? vocoderSessionOptionsFactory)
+    {
+        model = null;
+        this.sessionOptionsFactory = sessionOptionsFactory;
+        this.vocoderSessionOptionsFactory = vocoderSessionOptionsFactory;
+    }
+
+    /// <summary>
+    /// Creates a CloneVoice instance from explicit model file paths. The
+    /// embeddings are read from the given embeddings.bin container; no files
+    /// are copied. The speaker encoder model is required for voice cloning.
+    /// </summary>
+    public static CloneVoice FromFiles(
+        string vocabPath,
+        string mergesPath,
+        string embeddingsBinPath,
+        string talkerPrefillPath,
+        string talkerDecodePath,
+        string codePredictorPath,
+        string vocoderPath,
+        string speakerEncoderPath,
+        Func<SessionOptions>? sessionOptionsFactory = null,
+        Func<SessionOptions>? vocoderSessionOptionsFactory = null)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(vocabPath);
+        ArgumentException.ThrowIfNullOrWhiteSpace(mergesPath);
+        ArgumentException.ThrowIfNullOrWhiteSpace(embeddingsBinPath);
+        ArgumentException.ThrowIfNullOrWhiteSpace(talkerPrefillPath);
+        ArgumentException.ThrowIfNullOrWhiteSpace(talkerDecodePath);
+        ArgumentException.ThrowIfNullOrWhiteSpace(codePredictorPath);
+        ArgumentException.ThrowIfNullOrWhiteSpace(vocoderPath);
+        ArgumentException.ThrowIfNullOrWhiteSpace(speakerEncoderPath);
+
+        if (!File.Exists(embeddingsBinPath))
+            throw new FileNotFoundException("embeddings.bin not found.", embeddingsBinPath);
+
+        if (!File.Exists(speakerEncoderPath))
+        {
+            throw new FileNotFoundException(
+                "Speaker encoder model not found. Use the Base model (not CustomVoice) for voice cloning.",
+                speakerEncoderPath);
+        }
+
+        var embeddingsDir = Path.GetDirectoryName(Path.GetFullPath(embeddingsBinPath)) ?? string.Empty;
+
+        var voice = new CloneVoice(sessionOptionsFactory, vocoderSessionOptionsFactory);
+        voice.tokenizer = new TextTokenizer(vocabPath, mergesPath);
+        voice.embeddings = new EmbeddingStore(embeddingsDir, configPath: null);
+        voice.languageModel = new LanguageModel(talkerPrefillPath, talkerDecodePath, codePredictorPath, voice.embeddings, sessionOptionsFactory);
+        voice.vocoder = new Vocoder(vocoderPath, vocoderSessionOptionsFactory ?? sessionOptionsFactory);
+        voice.speakerEncoder = new SpeakerEncoder(speakerEncoderPath, sessionOptionsFactory);
+        return voice;
+    }
+
     public Task Initialize(CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
@@ -38,22 +95,22 @@ public class CloneVoice : IDisposable
 
     public async Task<byte[]> Clone(
         string text,
-        Stream referenceAudioStream,
+        byte[] referenceAudio, //Stream,
         string? referenceText = null,
         string language = DefaultLanguage,
         CancellationToken cancellationToken = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(text);
 
-        if (referenceAudioStream is null)
+        if (referenceAudio is null)
         {
-            throw new ArgumentNullException(nameof(referenceAudioStream));
+            throw new ArgumentNullException(nameof(referenceAudio));
         }
 
         cancellationToken.ThrowIfCancellationRequested();
         EnsureInitialized();
 
-        var referenceAudio = await ReadAllBytesAsync(referenceAudioStream, cancellationToken);
+        //var referenceAudio = await ReadAllBytesAsync(referenceAudioStream, cancellationToken);
         var tempPath = Path.Combine(Path.GetTempPath(), $"season-qwen-{Guid.NewGuid():N}.wav");
 
         try
@@ -83,10 +140,10 @@ public class CloneVoice : IDisposable
         if (tokenizer != null)
             return;
 
-        var tokenizerDir = Path.Combine(model, "tokenizer");
-        var embeddingsDir = Path.Combine(model, "embeddings");
+        var tokenizerDir = Path.Combine(model!, "tokenizer");
+        var embeddingsDir = Path.Combine(model!, "embeddings");
         var configPath = Path.Combine(embeddingsDir, "config.json");
-        var speakerEncoderPath = Path.Combine(model, "speaker_encoder.onnx");
+        var speakerEncoderPath = Path.Combine(model!, "speaker_encoder.onnx");
 
         if (!File.Exists(speakerEncoderPath))
         {
@@ -97,8 +154,8 @@ public class CloneVoice : IDisposable
 
         tokenizer = new TextTokenizer(tokenizerDir);
         embeddings = new EmbeddingStore(embeddingsDir, configPath);
-        languageModel = new LanguageModel(model, embeddings, sessionOptionsFactory);
-        vocoder = new Vocoder(Path.Combine(model, "vocoder.onnx"), sessionOptionsFactory);
+        languageModel = new LanguageModel(model!, embeddings, sessionOptionsFactory);
+        vocoder = new Vocoder(Path.Combine(model!, "vocoder.onnx"), sessionOptionsFactory);
         speakerEncoder = new SpeakerEncoder(speakerEncoderPath, sessionOptionsFactory);
     }
 
@@ -195,29 +252,16 @@ public class CloneVoice : IDisposable
         if (speechTokenizer != null)
             return speechTokenizer;
 
-        var modelPath = Path.Combine(model, "tokenizer12hz_encode.onnx");
-        if (!File.Exists(modelPath))
+        var modelPath = model != null ? Path.Combine(model, "tokenizer12hz_encode.onnx") : null;
+        if (modelPath is null || !File.Exists(modelPath))
         {
             throw new FileNotFoundException(
                 "Speech tokenizer model not found. Required for ICL (ref_text) mode.",
-                modelPath);
+                modelPath ?? "tokenizer12hz_encode.onnx");
         }
 
         speechTokenizer = new SpeechTokenizer(modelPath, sessionOptionsFactory);
         return speechTokenizer;
-    }
-
-    static async Task<byte[]> ReadAllBytesAsync(Stream stream, CancellationToken cancellationToken)
-    {
-        if (stream is MemoryStream memoryStream && memoryStream.TryGetBuffer(out var buffer))
-            return buffer.AsSpan(0, (int)memoryStream.Length).ToArray();
-
-        if (stream.CanSeek)
-            stream.Position = 0;
-
-        using var copy = new MemoryStream();
-        await stream.CopyToAsync(copy, cancellationToken);
-        return copy.ToArray();
     }
 
     public void Dispose()
