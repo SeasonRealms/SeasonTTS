@@ -1,9 +1,8 @@
-
 // Copyright (c) SeasonEngine and contributors.
 // Licensed under the MIT License.
 // https://github.com/SeasonRealms/SeasonTTS
 
-namespace SeasonTTS.GGML;
+namespace Season.TTS.GGML;
 
 /// <summary>
 /// Managed wrapper around the qwentts.cpp native library.
@@ -385,29 +384,6 @@ public sealed unsafe class QwenEngine : IDisposable
         }
     }
 
-    public static QwenBackendInfo[] GetAvailableBackends()
-    {
-        int count = QwenNative.qt_backend_count();
-        if (count <= 0)
-            return [];
-
-        var backends = new QwenBackendInfo[count];
-        for (int i = 0; i < count; i++)
-        {
-            QtBackendInfoNative nativeInfo;
-            if (!QwenNative.qt_backend_get_info(i, &nativeInfo))
-                throw new InvalidOperationException(GetLastError());
-
-            backends[i] = new QwenBackendInfo(
-                Name: PtrToStringUtf8(nativeInfo.Name),
-                BackendRegistry: PtrToStringUtf8(nativeInfo.BackendReg),
-                Description: PtrToStringUtf8(nativeInfo.Description),
-                DeviceId: PtrToStringUtf8OrNull(nativeInfo.DeviceId),
-                DeviceType: (QtBackendDeviceType)nativeInfo.DeviceType);
-        }
-        return backends;
-    }
-
     // ── Logging ────────────────────────────────────────────────────
 
     private static QtLogCallback? _logCallbackDelegate;
@@ -463,9 +439,6 @@ public sealed unsafe class QwenEngine : IDisposable
 
     private static string PtrToStringUtf8(byte* p) =>
         Marshal.PtrToStringUTF8((IntPtr)p) ?? "";
-
-    private static string? PtrToStringUtf8OrNull(byte* p) =>
-        p != null ? Marshal.PtrToStringUTF8((IntPtr)p) : null;
 
     private static void TraceDebug(string message) =>
         System.Diagnostics.Debug.WriteLine(message);

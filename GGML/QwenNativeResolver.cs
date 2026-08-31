@@ -1,9 +1,8 @@
-
 // Copyright (c) SeasonEngine and contributors.
 // Licensed under the MIT License.
 // https://github.com/SeasonRealms/SeasonTTS
 
-namespace SeasonTTS.GGML;
+namespace Season.TTS.GGML;
 
 internal static class QwenNativeResolver
 {

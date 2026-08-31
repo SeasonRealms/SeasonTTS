@@ -1,9 +1,8 @@
-
 // Copyright (c) SeasonEngine and contributors.
 // Licensed under the MIT License.
 // https://github.com/SeasonRealms/SeasonTTS
 
-namespace SeasonTTS.GGML;
+namespace Season.TTS.GGML;
 
 /// <summary>
 /// Raw P/Invoke declarations for the qwentts.cpp public ABI (qwen.h).
@@ -77,13 +76,6 @@ public static unsafe class QwenNative
 
     [DllImport(NativeLib, CallingConvention = CallingConvention.Cdecl)]
     public static extern int qt_duration_sec_to_tokens(IntPtr ctx, float durationSec);
-
-    [DllImport(NativeLib, CallingConvention = CallingConvention.Cdecl)]
-    public static extern int qt_backend_count();
-
-    [DllImport(NativeLib, CallingConvention = CallingConvention.Cdecl)]
-    [return: MarshalAs(UnmanagedType.I1)]
-    public static extern bool qt_backend_get_info(int index, QtBackendInfoNative* info);
 
     // ── Logging ────────────────────────────────────────────────────
 

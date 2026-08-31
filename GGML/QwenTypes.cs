@@ -1,9 +1,8 @@
-
 // Copyright (c) SeasonEngine and contributors.
 // Licensed under the MIT License.
 // https://github.com/SeasonRealms/SeasonTTS
 
-namespace SeasonTTS.GGML;
+namespace Season.TTS.GGML;
 
 // ── Status codes ──────────────────────────────────────────────────
 
@@ -26,22 +25,6 @@ public enum QtLogLevel
     Warn  = 2,
     Error = 3,
 }
-
-public enum QtBackendDeviceType
-{
-    CPU   = 0,
-    GPU   = 1,
-    IGPU  = 2,
-    ACCEL = 3,
-    META  = 4,
-}
-
-public readonly record struct QwenBackendInfo(
-    string Name,
-    string BackendRegistry,
-    string Description,
-    string? DeviceId,
-    QtBackendDeviceType DeviceType);
 
 // ── Output audio buffer ───────────────────────────────────────────
 
@@ -81,16 +64,6 @@ public unsafe struct QtInitParams
     // ABI v3 additions:
     public byte* Backend;         // explicit backend name (UTF-8), NULL/"" = auto
     public int   GpuDeviceIndex;  // -1 = auto, >=0 = specific device index
-}
-
-[StructLayout(LayoutKind.Sequential)]
-public unsafe struct QtBackendInfoNative
-{
-    public byte* Name;
-    public byte* BackendReg;
-    public byte* Description;
-    public byte* DeviceId;
-    public int   DeviceType;
 }
 
 // ── Synthesis parameters ──────────────────────────────────────────
