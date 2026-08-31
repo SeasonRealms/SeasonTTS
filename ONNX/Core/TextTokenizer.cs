@@ -47,17 +47,47 @@ internal sealed class TextTokenizer : IDisposable
     private readonly BpeTokenizer _tokenizer;
 
     /// <summary>
-    /// Loads the BPE tokenizer from vocab.json and merges.txt in <paramref name="modelDir"/>.
+    /// Loads the BPE tokenizer from explicit vocab.json and merges.txt paths.
     /// </summary>
-    public TextTokenizer(string modelDir)
+    public TextTokenizer(string vocabPath, string mergesPath)
     {
-        var vocabPath = Path.Combine(modelDir, "vocab.json");
-        var mergesPath = Path.Combine(modelDir, "merges.txt");
-
         if (!File.Exists(vocabPath))
-            throw new FileNotFoundException("vocab.json not found in model directory.", vocabPath);
+            throw new FileNotFoundException("vocab.json not found.", vocabPath);
         if (!File.Exists(mergesPath))
-            throw new FileNotFoundException("merges.txt not found in model directory.", mergesPath);
+            throw new FileNotFoundException("merges.txt not found.", mergesPath);
+
+        using (var vocabStream = File.OpenRead(vocabPath))
+        {
+            int first = vocabStream.ReadByte();
+
+            if (first == 0xEF)
+            {
+                int b1 = vocabStream.ReadByte();
+                int b2 = vocabStream.ReadByte();
+
+                if (b1 == 0xBB && b2 == 0xBF)
+                    first = vocabStream.ReadByte();
+            }
+
+            if (first != '{')
+            {
+                throw new InvalidDataException(
+                    $"Vocab file is not a JSON vocabulary (first byte 0x{first:X2}): {vocabPath}. " +
+                    "It looks like a binary model file; pick vocab.json for the Vocab row.");
+            }
+        }
+
+        using (var mergesReader = File.OpenText(mergesPath))
+        {
+            var firstLine = mergesReader.ReadLine();
+
+            if (string.IsNullOrWhiteSpace(firstLine) || !firstLine.StartsWith("#version", StringComparison.Ordinal))
+            {
+                throw new InvalidDataException(
+                    $"Merges file is not a BPE merges.txt (first line: '{firstLine}'): {mergesPath}. " +
+                    "Pick merges.txt for the Merges row.");
+            }
+        }
 
         var preTokenizer = new RegexPreTokenizer(Gpt2Regex, SpecialTokensMap);
 
@@ -70,6 +100,14 @@ internal sealed class TextTokenizer : IDisposable
         };
 
         _tokenizer = BpeTokenizer.Create(options);
+    }
+
+    /// <summary>
+    /// Loads the BPE tokenizer from vocab.json and merges.txt in <paramref name="modelDir"/>.
+    /// </summary>
+    public TextTokenizer(string modelDir)
+        : this(Path.Combine(modelDir, "vocab.json"), Path.Combine(modelDir, "merges.txt"))
+    {
     }
 
     /// <summary>

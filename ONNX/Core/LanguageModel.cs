@@ -12,7 +12,9 @@ internal sealed class LanguageModel : IDisposable
     private InferenceSession? _decodeSession;
     private InferenceSession? _cpSession;
     private readonly EmbeddingStore _embeddings;
-    private readonly string _modelDir;
+    private readonly string _prefillPath;
+    private readonly string _decodePath;
+    private readonly string _cpPath;
     private readonly Func<SessionOptions> _sessionOptionsFactory;
 
     // Dimensions from config — set once after EmbeddingStore loads config.json
@@ -26,10 +28,15 @@ internal sealed class LanguageModel : IDisposable
     private readonly int _cpNumKvHeads;     // code_predictor num_key_value_heads
     private readonly int _cpHeadDim;        // code_predictor head_dim
 
-    public LanguageModel(string modelDir, EmbeddingStore embeddings, Func<SessionOptions>? sessionOptionsFactory = null)
+    /// <summary>
+    /// Creates the language model from explicit ONNX model paths.
+    /// </summary>
+    public LanguageModel(string talkerPrefillPath, string talkerDecodePath, string codePredictorPath, EmbeddingStore embeddings, Func<SessionOptions>? sessionOptionsFactory = null)
     {
         _embeddings = embeddings;
-        _modelDir = modelDir;
+        _prefillPath = talkerPrefillPath;
+        _decodePath = talkerDecodePath;
+        _cpPath = codePredictorPath;
         _sessionOptionsFactory = sessionOptionsFactory ?? CreateDefaultOptions;
 
         // Read dimensions from config.json (loaded by EmbeddingStore)
@@ -45,6 +52,20 @@ internal sealed class LanguageModel : IDisposable
         _cpHeadDim = cfg.code_predictor.head_dim;
     }
 
+    /// <summary>
+    /// Creates the language model from a model directory containing
+    /// talker_prefill.onnx / talker_decode.onnx / code_predictor.onnx.
+    /// </summary>
+    public LanguageModel(string modelDir, EmbeddingStore embeddings, Func<SessionOptions>? sessionOptionsFactory = null)
+        : this(
+            Path.Combine(modelDir, "talker_prefill.onnx"),
+            Path.Combine(modelDir, "talker_decode.onnx"),
+            Path.Combine(modelDir, "code_predictor.onnx"),
+            embeddings,
+            sessionOptionsFactory)
+    {
+    }
+
     private static SessionOptions CreateDefaultOptions() => new()
     {
         GraphOptimizationLevel = GraphOptimizationLevel.ORT_ENABLE_ALL,
@@ -58,7 +79,7 @@ internal sealed class LanguageModel : IDisposable
     private InferenceSession GetPrefillSession()
     {
         // SEC-3: File size pre-check to prevent out-of-memory attacks
-        var modelPath = Path.Combine(_modelDir, "talker_prefill.onnx");
+        var modelPath = _prefillPath;
         var fileInfo = new FileInfo(modelPath);
         const long maxOnnxSize = 8_000_000_000; // 8 GB (1.7B models are ~5.4 GB)
         if (fileInfo.Length > maxOnnxSize)
@@ -70,7 +91,7 @@ internal sealed class LanguageModel : IDisposable
     private InferenceSession GetDecodeSession()
     {
         // SEC-3: File size pre-check to prevent out-of-memory attacks
-        var modelPath = Path.Combine(_modelDir, "talker_decode.onnx");
+        var modelPath = _decodePath;
         var fileInfo = new FileInfo(modelPath);
         const long maxOnnxSize = 8_000_000_000; // 8 GB (1.7B models are ~5.4 GB)
         if (fileInfo.Length > maxOnnxSize)
@@ -82,7 +103,7 @@ internal sealed class LanguageModel : IDisposable
     private InferenceSession GetCpSession()
     {
         // SEC-3: File size pre-check to prevent out-of-memory attacks
-        var modelPath = Path.Combine(_modelDir, "code_predictor.onnx");
+        var modelPath = _cpPath;
         var fileInfo = new FileInfo(modelPath);
         const long maxOnnxSize = 8_000_000_000; // 8 GB (1.7B models are ~5.4 GB)
         if (fileInfo.Length > maxOnnxSize)
@@ -187,8 +208,8 @@ internal sealed class LanguageModel : IDisposable
         var flatMask = ArrayPool<long>.Shared.Rent(1 * prefillLen);
         var flatPosIds = ArrayPool<long>.Shared.Rent(3 * 1 * prefillLen);
         
-        float[] logits, hiddenStates;
-        float[] pastKeys, pastValues;
+        float[] logits = null, hiddenStates = null;
+        float[] pastKeys = null, pastValues = null;
 
         try
         {
@@ -209,6 +230,10 @@ internal sealed class LanguageModel : IDisposable
                 hiddenStates = prefillOutputs[1].GetTensorDataAsSpan<float>().ToArray();
                 (pastKeys, pastValues) = StackPrefillKVFromOrtValues(prefillOutputs, prefillLen);
             }
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine(ex);
         }
         finally
         {
@@ -342,6 +367,10 @@ internal sealed class LanguageModel : IDisposable
                             }
                         }
                     }
+                    catch (Exception ex)
+                    {
+                        Debug.WriteLine(ex);
+                    }
                     finally
                     {
                         ArrayPool<float>.Shared.Return(flatCpEmbeds);
@@ -398,6 +427,11 @@ internal sealed class LanguageModel : IDisposable
                 pastKeys = decodeOutputs.First(x => x.Name == "present_keys").AsEnumerable<float>().ToArray();
                 pastValues = decodeOutputs.First(x => x.Name == "present_values").AsEnumerable<float>().ToArray();
             }
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine(ex);
+            throw ex;
         }
         finally
         {

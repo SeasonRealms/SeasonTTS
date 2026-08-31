@@ -1,3 +1,6 @@
+using System.Numerics;
+using System.Runtime.InteropServices;
+using System.Threading.Tasks;
 
 namespace ElBruno.QwenTTS.Core;
 
@@ -24,6 +27,9 @@ internal sealed class EmbeddingStore : IDisposable
     private readonly float[][,]? _projectedCpCodecEmbeddings;     // 15 × (cp_vocab, cpModelHiddenSize)
     private readonly float[,]? _projectedTalkerCodecEmbedding;    // (talker_vocab, cpModelHiddenSize)
 
+    // Non-null when the embeddings directory is bundled as a single embeddings.bin
+    private readonly EmbeddingContainer? _container;
+
     // Dimensions derived from loaded arrays — no hardcoding
     private readonly int _textHiddenSize;   // text embedding dim (2048 for both 0.6B and 1.7B)
     private readonly int _fc1OutSize;       // intermediate MLP size
@@ -48,34 +54,45 @@ internal sealed class EmbeddingStore : IDisposable
     /// <summary>Authoritative Code Predictor model hidden_size from config.json (for ONNX input dim).</summary>
     public int CpModelHiddenSize => _cpModelHiddenSize;
 
-    public EmbeddingStore(string embeddingsDir, string configPath)
+    /// <summary>
+    /// Creates the store from an embeddings directory. When the directory
+    /// contains a bundled embeddings.bin, the container is used and
+    /// <paramref name="configPath"/> is ignored; otherwise scattered files are
+    /// loaded and <paramref name="configPath"/> must point to config.json.
+    /// </summary>
+    public EmbeddingStore(string embeddingsDir, string? configPath)
     {
+        // Container mode: a single embeddings.bin bundles every .npy/.json file.
+        // Scattered-file mode is kept as a fallback for legacy model folders.
+        var containerPath = Path.Combine(embeddingsDir, "embeddings.bin");
+        _container = File.Exists(containerPath) ? EmbeddingContainer.Open(containerPath) : null;
+
         // Load config
-        var configJson = File.ReadAllText(configPath);
+        var configJson = _container != null
+            ? _container.ReadEntryText("config.json")
+            : File.ReadAllText(configPath ?? throw new InvalidDataException("config.json path is required when embeddings.bin is absent."));
         Config = JsonSerializer.Deserialize<ModelConfig>(configJson)
             ?? throw new InvalidDataException("Failed to parse config.json");
 
         // Load text embedding and projection
-        _textEmbedding = NpyReader.ReadFloat2D(Path.Combine(embeddingsDir, "text_embedding.npy"));
-        _fc1Weight = NpyReader.ReadFloat2D(Path.Combine(embeddingsDir, "text_projection_fc1_weight.npy"));
-        _fc1Bias = NpyReader.ReadFloat1D(Path.Combine(embeddingsDir, "text_projection_fc1_bias.npy"));
-        _fc2Weight = NpyReader.ReadFloat2D(Path.Combine(embeddingsDir, "text_projection_fc2_weight.npy"));
-        _fc2Bias = NpyReader.ReadFloat1D(Path.Combine(embeddingsDir, "text_projection_fc2_bias.npy"));
+        _textEmbedding = ReadMatrix(embeddingsDir, "text_embedding.npy");
+        _fc1Weight = ReadMatrix(embeddingsDir, "text_projection_fc1_weight.npy");
+        _fc1Bias = ReadVector(embeddingsDir, "text_projection_fc1_bias.npy");
+        _fc2Weight = ReadMatrix(embeddingsDir, "text_projection_fc2_weight.npy");
+        _fc2Bias = ReadVector(embeddingsDir, "text_projection_fc2_bias.npy");
 
         // Load talker codec embedding
-        _talkerCodecEmbedding = NpyReader.ReadFloat2D(Path.Combine(embeddingsDir, "talker_codec_embedding.npy"));
+        _talkerCodecEmbedding = ReadMatrix(embeddingsDir, "talker_codec_embedding.npy");
 
         // Load CP codec embeddings (15 groups)
         _cpCodecEmbeddings = new float[15][,];
         for (int i = 0; i < 15; i++)
-        {
-            var path = Path.Combine(embeddingsDir, $"cp_codec_embedding_{i}.npy");
-            _cpCodecEmbeddings[i] = NpyReader.ReadFloat2D(path);
-        }
+            _cpCodecEmbeddings[i] = ReadMatrix(embeddingsDir, $"cp_codec_embedding_{i}.npy");
 
         // Load speaker IDs
-        var speakerIdsPath = Path.Combine(embeddingsDir, "speaker_ids.json");
-        var speakerJson = File.ReadAllText(speakerIdsPath);
+        var speakerJson = _container != null
+            ? _container.ReadEntryText("speaker_ids.json")
+            : File.ReadAllText(Path.Combine(embeddingsDir, "speaker_ids.json"));
         _speakerIds = JsonSerializer.Deserialize<Dictionary<string, int>>(speakerJson)
             ?? throw new InvalidDataException("Failed to parse speaker_ids.json");
 
@@ -91,12 +108,10 @@ internal sealed class EmbeddingStore : IDisposable
             : _cpHiddenSize;
 
         // Optional: load CP projection weights (only present for 1.7B with re-exported code_predictor)
-        var projWeightPath = Path.Combine(embeddingsDir, "cp_projection_weight.npy");
-        var projBiasPath = Path.Combine(embeddingsDir, "cp_projection_bias.npy");
-        if (File.Exists(projWeightPath) && File.Exists(projBiasPath))
+        if (EntryExists(embeddingsDir, "cp_projection_weight.npy") && EntryExists(embeddingsDir, "cp_projection_bias.npy"))
         {
-            _cpProjectionWeight = NpyReader.ReadFloat2D(projWeightPath);
-            _cpProjectionBias = NpyReader.ReadFloat1D(projBiasPath);
+            _cpProjectionWeight = ReadMatrix(embeddingsDir, "cp_projection_weight.npy");
+            _cpProjectionBias = ReadVector(embeddingsDir, "cp_projection_bias.npy");
 
             // Validate projection weight output dim matches bias length
             if (_cpProjectionWeight.GetLength(0) != _cpProjectionBias.Length)
@@ -108,36 +123,21 @@ internal sealed class EmbeddingStore : IDisposable
                 throw new InvalidDataException(
                     $"CP projection input mismatch: weight columns ({_cpProjectionWeight.GetLength(1)}) != hidden_size ({_hiddenSize})");
 
-            // Pre-compute projected embedding tables to avoid per-step matrix-vector multiplies
-            int projOutDim = _cpProjectionWeight.GetLength(0);
-            var tempInput = new float[_cpProjectionWeight.GetLength(1)];
-            var tempOutput = new float[projOutDim];
+            // Pre-compute projected embedding tables (SIMD GEMM + 16-way parallel).
+            // Replaces the per-token scalar MatMul loop; see ProjectTable below.
+            System.Diagnostics.Debug.WriteLine($"[EmbeddingStore] hidden={_hiddenSize} cpHidden={_cpHiddenSize} cpVocab={_cpCodecEmbeddings[0].GetLength(0)}");
 
             _projectedCpCodecEmbeddings = new float[15][,];
-            for (int g = 0; g < 15; g++)
+            float[,]? talkerTable = null;
+            Parallel.For(0, 16, i =>
             {
-                int vocab = _cpCodecEmbeddings[g].GetLength(0);
-                _projectedCpCodecEmbeddings[g] = new float[vocab, projOutDim];
-                for (int t = 0; t < vocab; t++)
-                {
-                    for (int j = 0; j < _cpHiddenSize; j++)
-                        tempInput[j] = _cpCodecEmbeddings[g][t, j];
-                    CpProjection(tempInput, tempOutput);
-                    for (int j = 0; j < projOutDim; j++)
-                        _projectedCpCodecEmbeddings[g][t, j] = tempOutput[j];
-                }
-            }
-
-            int talkerVocab = _talkerCodecEmbedding.GetLength(0);
-            _projectedTalkerCodecEmbedding = new float[talkerVocab, projOutDim];
-            for (int t = 0; t < talkerVocab; t++)
-            {
-                for (int j = 0; j < _hiddenSize; j++)
-                    tempInput[j] = _talkerCodecEmbedding[t, j];
-                CpProjection(tempInput, tempOutput);
-                for (int j = 0; j < projOutDim; j++)
-                    _projectedTalkerCodecEmbedding[t, j] = tempOutput[j];
-            }
+                if (i < 15)
+                    _projectedCpCodecEmbeddings[i] =
+                        ProjectTable(_cpCodecEmbeddings[i], _cpProjectionWeight, _cpProjectionBias);
+                else
+                    talkerTable = ProjectTable(_talkerCodecEmbedding, _cpProjectionWeight, _cpProjectionBias);
+            });
+            _projectedTalkerCodecEmbedding = talkerTable!;
         }
     }
 
@@ -303,10 +303,68 @@ internal sealed class EmbeddingStore : IDisposable
 
     public void Dispose()
     {
-        // No unmanaged resources
+        _container?.Dispose();
     }
 
+    // Container-aware load helpers: single-file bundle when present, scattered files otherwise.
+    float[,] ReadMatrix(string embeddingsDir, string name)
+        => _container != null
+            ? NpyReader.ReadFloat2D(_container, name)
+            : NpyReader.ReadFloat2D(Path.Combine(embeddingsDir, name));
+
+    float[] ReadVector(string embeddingsDir, string name)
+        => _container != null
+            ? NpyReader.ReadFloat1D(_container, name)
+            : NpyReader.ReadFloat1D(Path.Combine(embeddingsDir, name));
+
+    bool EntryExists(string embeddingsDir, string name)
+        => _container != null
+            ? _container.TryGetEntry(name, out _)
+            : File.Exists(Path.Combine(embeddingsDir, name));
+
     private static float SiLU(float x) => x / (1.0f + MathF.Exp(-x));
+
+    /// <summary>
+    /// Batched projection: dst = src @ weight^T + bias.
+    /// SIMD dot products (Vector&lt;float&gt;, AVX2/NEON width) per output row; callers
+    /// parallelize across the 15 CP groups + talker table (Parallel.For in the constructor).
+    /// </summary>
+    static float[,] ProjectTable(float[,] src, float[,] weight, float[] bias)
+    {
+        int rows = src.GetLength(0);
+        int inDim = src.GetLength(1);
+        int outDim = weight.GetLength(0);
+
+        // Guard against the source table being narrower than the projection input
+        // (e.g. cp_codec_embedding stored at cp_hidden instead of talker hidden_size).
+        if (inDim != weight.GetLength(1))
+            throw new InvalidDataException(
+                $"Projection input mismatch: source dim ({inDim}) != weight columns ({weight.GetLength(1)})");
+
+        var dst = new float[rows, outDim];
+        int vecWidth = Vector<float>.Count;
+
+        for (int t = 0; t < rows; t++)
+        {
+            var row = MemoryMarshal.CreateSpan(ref src[t, 0], inDim);
+            var drow = MemoryMarshal.CreateSpan(ref dst[t, 0], outDim);
+
+            for (int j = 0; j < outDim; j++)
+            {
+                var wrow = MemoryMarshal.CreateSpan(ref weight[j, 0], inDim);
+                var acc = Vector<float>.Zero;
+                int k = 0;
+                for (; k <= inDim - vecWidth; k += vecWidth)
+                    acc += new Vector<float>(row.Slice(k)) * new Vector<float>(wrow.Slice(k));
+
+                float sum = Vector.Sum(acc) + bias[j];
+                for (; k < inDim; k++)
+                    sum += wrow[k] * row[k];
+                drow[j] = sum;
+            }
+        }
+        return dst;
+    }
 
     /// <summary>
     /// Matrix-vector multiply: output = weight @ input

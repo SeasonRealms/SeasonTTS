@@ -10,6 +10,29 @@ internal static class NpyReader
     public static float[] ReadFloat1D(string path)
     {
         var (dtype, shape, data) = ReadNpy(path);
+        return ToFloat1D(dtype, shape, data);
+    }
+
+    public static float[] ReadFloat1D(EmbeddingContainer container, string name)
+    {
+        var (dtype, shape, data) = ReadNpy(container, name);
+        return ToFloat1D(dtype, shape, data);
+    }
+
+    public static float[,] ReadFloat2D(string path)
+    {
+        var (dtype, shape, data) = ReadNpy(path);
+        return ToFloat2D(dtype, shape, data);
+    }
+
+    public static float[,] ReadFloat2D(EmbeddingContainer container, string name)
+    {
+        var (dtype, shape, data) = ReadNpy(container, name);
+        return ToFloat2D(dtype, shape, data);
+    }
+
+    static float[] ToFloat1D(string dtype, int[] shape, byte[] data)
+    {
         if (dtype != "<f4")
             throw new InvalidDataException($"Expected float32 (<f4), got {dtype}");
         if (shape.Length != 1)
@@ -20,9 +43,8 @@ internal static class NpyReader
         return result;
     }
 
-    public static float[,] ReadFloat2D(string path)
+    static float[,] ToFloat2D(string dtype, int[] shape, byte[] data)
     {
-        var (dtype, shape, data) = ReadNpy(path);
         if (dtype != "<f4")
             throw new InvalidDataException($"Expected float32 (<f4), got {dtype}");
         if (shape.Length != 2)
@@ -56,7 +78,25 @@ internal static class NpyReader
             throw new InvalidOperationException($"NPY file too large ({fileInfo.Length / 1e6:F2} MB). Maximum allowed: {maxNpySize / 1e6:F2} MB.");
 
         using var fs = File.OpenRead(path);
-        
+        return ReadNpyCore(fs);
+    }
+
+    private static (string dtype, int[] shape, byte[] data) ReadNpy(EmbeddingContainer container, string name)
+    {
+        if (!container.TryGetEntry(name, out var entry))
+            throw new FileNotFoundException($"Entry not found in embeddings container: {name}");
+
+        // Same 2 GB guard as the scattered-file path (1.7B text_embedding.npy ~1.2 GB)
+        const long maxNpySize = 2_000_000_000; // 2 GB
+        if (entry.Length > maxNpySize)
+            throw new InvalidOperationException($"NPY entry too large ({entry.Length / 1e6:F2} MB). Maximum allowed: {maxNpySize / 1e6:F2} MB.");
+
+        using var fs = container.OpenEntryStream(name);
+        return ReadNpyCore(fs);
+    }
+
+    private static (string dtype, int[] shape, byte[] data) ReadNpyCore(Stream fs)
+    {
         // Read magic: 0x93 N U M P Y
         Span<byte> magic = stackalloc byte[6];
         ReadOnlySpan<byte> expected = [0x93, (byte)'N', (byte)'U', (byte)'M', (byte)'P', (byte)'Y'];
