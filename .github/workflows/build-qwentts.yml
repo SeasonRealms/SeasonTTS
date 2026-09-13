@@ -27,6 +27,26 @@ on:
         description: "CUDA architectures for the Windows CMake build"
         required: false
         default: "75-virtual;80-real;86-real;89-real;90-virtual"
+      maccatalyst_min_ios:
+        description: "Mac Catalyst deployment target (iOS version used in the *-macabi triple)"
+        required: false
+        default: "15.0"
+      maccatalyst_blas:
+        description: "Build the Accelerate-backed BLAS backend for Mac Catalyst"
+        required: false
+        type: choice
+        default: "ON"
+        options:
+          - ON
+          - OFF
+      build_target:
+        description: "Platform to build (one job per run)"
+        required: true
+        type: choice
+        default: "maccatalyst"
+        options:
+          - maccatalyst
+          - windows
       build_parallel:
         description: "Parallel build jobs"
         required: false
@@ -41,6 +61,9 @@ env:
 
 jobs:
   build-windows:
+    # Runs only when build_target is windows; build-maccatalyst is gated the same way,
+    # so exactly one build job executes per workflow run.
+    if: github.event.inputs.build_target == 'windows'
     runs-on: windows-2022
     timeout-minutes: 240
     steps:
@@ -309,4 +332,251 @@ jobs:
         with:
           name: qwentts-win-x64-${{ github.event.inputs.configuration }}
           path: out/runtimes/win-x64/native/
+          if-no-files-found: error
+
+  build-maccatalyst:
+    # Runs only when build_target is maccatalyst; build-windows is gated the same way,
+    # so exactly one build job executes per workflow run.
+    if: github.event.inputs.build_target == 'maccatalyst'
+    # Apple Silicon only: macos-15 is already arm64, so this is a native build.
+    # Intel Macs (x86_64 / maccatalyst-x64) are deliberately not produced - see the
+    # generated README.txt for what that costs.
+    runs-on: macos-15
+    timeout-minutes: 180
+
+    env:
+      RID: maccatalyst-arm64
+      ARCH: arm64
+
+    steps:
+      - name: Clone qwentts.cpp
+        run: git clone --depth 1 --branch "${{ github.event.inputs.qwentts_ref }}" "https://github.com/${{ env.QWENTTS_REPO }}.git" qwentts
+
+      - name: Clone ggml fork
+        run: git clone --depth 1 --branch "${{ github.event.inputs.ggml_ref }}" "https://github.com/${{ env.GGML_REPO }}.git" qwentts/ggml
+
+      - name: Select Xcode
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+
+      - name: Install Ninja
+        run: |
+          if ! command -v ninja >/dev/null 2>&1; then
+            brew install ninja
+          fi
+          ninja --version
+
+      - name: Configure CMake
+        working-directory: qwentts
+        env:
+          MIN_IOS: ${{ github.event.inputs.maccatalyst_min_ios }}
+          ENABLE_BLAS: ${{ github.event.inputs.maccatalyst_blas }}
+        run: |
+          set -euo pipefail
+
+          # Mac Catalyst is not a CMAKE_SYSTEM_NAME. The supported way to target it
+          # is: keep the Darwin/macOS SDK and switch the clang target triple to
+          # <arch>-apple-ios<ver>-macabi. CMAKE_OSX_DEPLOYMENT_TARGET must stay empty,
+          # otherwise CMake injects -mmacosx-version-min=, which conflicts with -target.
+          SDK_PATH="$(xcrun --sdk macosx --show-sdk-path)"
+          TRIPLE="${ARCH}-apple-ios${MIN_IOS}-macabi"
+
+          # ggml_get_system_arch() compares CMAKE_OSX_ARCHITECTURES with STREQUAL, so it
+          # must hold exactly "arm64" for GGML_SYSTEM_ARCH to resolve to "ARM"; only then
+          # does GGML_CPU_ARM_ARCH take effect (-march=armv8.2-a+dotprod). A universal
+          # arm64;x86_64 value would not match and would fall back to the host
+          # CMAKE_SYSTEM_PROCESSOR. armv8.2-a+dotprod is exactly the apple_m1 baseline, so
+          # M1 and every later Apple Silicon chip run it.
+          CAT_FLAGS="-target ${TRIPLE}"
+          CAT_FLAGS="${CAT_FLAGS} -isystem ${SDK_PATH}/System/iOSSupport/usr/include"
+          CAT_FLAGS="${CAT_FLAGS} -iframework ${SDK_PATH}/System/iOSSupport/System/Library/Frameworks"
+
+          LINK_FLAGS="-target ${TRIPLE}"
+          LINK_FLAGS="${LINK_FLAGS} -L${SDK_PATH}/System/iOSSupport/usr/lib"
+          LINK_FLAGS="${LINK_FLAGS} -F${SDK_PATH}/System/iOSSupport/System/Library/Frameworks"
+
+          BUILD_DIR="${PWD}/build"
+
+          cmake -S . -B "${BUILD_DIR}" -G Ninja \
+            -DCMAKE_BUILD_TYPE="${{ github.event.inputs.configuration }}" \
+            -DCMAKE_OSX_SYSROOT="${SDK_PATH}" \
+            -DCMAKE_OSX_ARCHITECTURES="${ARCH}" \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET= \
+            -DCMAKE_C_FLAGS="${CAT_FLAGS}" \
+            -DCMAKE_CXX_FLAGS="${CAT_FLAGS}" \
+            -DCMAKE_OBJC_FLAGS="${CAT_FLAGS}" \
+            -DCMAKE_OBJCXX_FLAGS="${CAT_FLAGS}" \
+            -DCMAKE_ASM_FLAGS="${CAT_FLAGS}" \
+            -DCMAKE_EXE_LINKER_FLAGS="${LINK_FLAGS}" \
+            -DCMAKE_SHARED_LINKER_FLAGS="${LINK_FLAGS}" \
+            -DCMAKE_MODULE_LINKER_FLAGS="${LINK_FLAGS}" \
+            -DBUILD_SHARED_LIBS=OFF \
+            -DQWEN_SHARED=OFF \
+            -DGGML_BUILD_TESTS=OFF \
+            -DGGML_BUILD_EXAMPLES=OFF \
+            -DGGML_BACKEND_DL=OFF \
+            -DGGML_NATIVE=OFF \
+            -DGGML_CPU=ON \
+            -DGGML_CPU_ARM_ARCH=armv8.2-a+dotprod \
+            -DGGML_ACCELERATE=ON \
+            -DGGML_METAL=ON \
+            -DGGML_METAL_EMBED_LIBRARY=ON \
+            -DGGML_METAL_NDEBUG=ON \
+            -DGGML_BLAS="${ENABLE_BLAS}" \
+            -DGGML_BLAS_VENDOR=Apple \
+            -DGGML_OPENMP=OFF \
+            -DGGML_CUDA=OFF \
+            -DGGML_VULKAN=OFF
+
+      - name: Build
+        working-directory: qwentts
+        run: |
+          set -euo pipefail
+          cmake --build build --parallel "${{ github.event.inputs.build_parallel }}"
+
+      - name: Link single self-contained dylib
+        working-directory: qwentts
+        env:
+          MIN_IOS: ${{ github.event.inputs.maccatalyst_min_ios }}
+        run: |
+          set -euo pipefail
+
+          SDK_PATH="$(xcrun --sdk macosx --show-sdk-path)"
+          TRIPLE="${ARCH}-apple-ios${MIN_IOS}-macabi"
+
+          # qwen-core is always a static library; with QWEN_SHARED=OFF and
+          # GGML_BACKEND_DL=OFF every ggml piece is a separate .a as well. Merge them
+          # into ONE dylib with -force_load: the CPU / Metal / BLAS backends are only
+          # reached through ggml's backend registry at runtime and the embedded Metal
+          # library is only referenced from assembly, so without -force_load the linker
+          # would drop those object files.
+          archives=""
+          for a in libqwen-core.a libggml-base.a libggml.a libggml-cpu.a libggml-metal.a libggml-blas.a; do
+            found="$(find build -name "$a" | head -n1)"
+            if [ -n "$found" ]; then
+              archives="${archives} -Wl,-force_load,${found}"
+            fi
+          done
+
+          # qwen-core and the ggml core archives are mandatory; the backend archives
+          # depend on the enabled backends, so only their absence for a required backend
+          # would surface later.
+          for req in libqwen-core.a libggml-base.a libggml.a libggml-cpu.a libggml-metal.a; do
+            if ! find build -name "$req" | grep -q .; then
+              echo "Required static archive is missing: $req" >&2
+              exit 1
+            fi
+          done
+
+          # Reuse the Catalyst search paths so Foundation/Metal/MetalKit/Accelerate resolve
+          # against the macabi framework variants under the macOS SDK.
+          LINK_FLAGS="-target ${TRIPLE} -isysroot ${SDK_PATH}"
+          LINK_FLAGS="${LINK_FLAGS} -L${SDK_PATH}/System/iOSSupport/usr/lib"
+          LINK_FLAGS="${LINK_FLAGS} -F${SDK_PATH}/System/iOSSupport/System/Library/Frameworks"
+
+          mkdir -p build/merged
+          clang++ -dynamiclib ${LINK_FLAGS} \
+            -install_name @rpath/libqwen.dylib \
+            ${archives} \
+            -framework Foundation -framework Metal -framework MetalKit \
+            -framework Accelerate \
+            -o build/merged/libqwen.dylib
+
+          # The merged dylib must export the QT_API entry points SeasonTTS P/Invokes; a
+          # dropped backend object or an unresolved symbol shows up as a missing export
+          # here. Read nm once into a variable and match with a here-string: piping nm
+          # into grep -q lets grep close the pipe on the first match, which makes llvm-nm
+          # abort with "Broken pipe" and, under set -o pipefail, fails the whole pipeline
+          # even though the symbol was found.
+          nmOut="$(nm -gU build/merged/libqwen.dylib)"
+          for sym in _qt_version _qt_init _qt_free _qt_synthesize _qt_tts_default_params _qt_audio_free; do
+            if ! grep -q " ${sym}$" <<< "$nmOut"; then
+              echo "Merged dylib does not export ${sym}" >&2
+              exit 1
+            fi
+          done
+
+      - name: Collect artifacts
+        run: |
+          set -euo pipefail
+
+          out="out/runtimes/${RID}/native"
+          mkdir -p "$out"
+
+          cp qwentts/src/qwen.h "$out/qwen.h"
+          if [ -f "qwentts/LICENSE" ]; then
+            cp "qwentts/LICENSE" "$out/qwentts.txt"
+          fi
+          if [ -f "qwentts/ggml/LICENSE" ]; then
+            cp "qwentts/ggml/LICENSE" "$out/ggml.txt"
+          fi
+
+          # Single statically-linked runtime: CPU (armv8.2-a+dotprod baseline), Metal and
+          # BLAS are compiled in and registered by ggml on first use - there are no
+          # loadable .so backend modules and nothing is dlopen'd. SeasonTTS P/Invokes
+          # "libqwen", which resolves against this single Mach-O.
+          cp qwentts/build/merged/libqwen.dylib "$out/libqwen.dylib"
+
+          if [ ! -f "$out/libqwen.dylib" ]; then
+            echo "Required qwentts runtime is missing: libqwen.dylib" >&2
+            exit 1
+          fi
+
+          # Fail loudly if the runtime was built for plain macOS, for Intel, or as a fat
+          # binary - such a library loads on the runner but not inside the Catalyst app.
+          lib="$out/libqwen.dylib"
+          archInfo="$(lipo -info "$lib")"
+          if ! echo "$archInfo" | grep -q "${ARCH}"; then
+            echo "Missing ${ARCH} slice in $lib: $archInfo" >&2
+            exit 1
+          fi
+          if echo "$archInfo" | grep -q 'x86_64\|i386'; then
+            echo "Unexpected Intel slice in $lib: $archInfo" >&2
+            exit 1
+          fi
+          if ! xcrun vtool -show-build-version "$lib" | grep -q "MACCATALYST"; then
+            echo "Not built for Mac Catalyst: $lib" >&2
+            xcrun vtool -show-build-version "$lib" >&2
+            exit 1
+          fi
+
+          # Record the artifact checksum so the dylib can be verified after download.
+          # Transferring the binary through text-mode channels (sync tools, text editors,
+          # some file shares) corrupts the Mach-O header into UTF-8 replacement characters;
+          # this is how a downstream user detects that before it reaches a device.
+          libsha256=$(shasum -a 256 "$out/libqwen.dylib" | awk '{print $1}')
+
+          manifest="$out/README.txt"
+          {
+            echo "Platform: ${RID}"
+            echo "Configuration: ${{ github.event.inputs.configuration }}"
+            echo "QWENTTS_REPO: https://github.com/${{ env.QWENTTS_REPO }}"
+            echo "QWENTTS_REF: ${{ github.event.inputs.qwentts_ref }}"
+            echo "GGML_REPO: https://github.com/${{ env.GGML_REPO }}"
+            echo "GGML_REF: ${{ github.event.inputs.ggml_ref }}"
+            echo "Target triple: ${ARCH}-apple-ios${{ github.event.inputs.maccatalyst_min_ios }}-macabi"
+            echo "Linkage: static (QWEN_SHARED=OFF, GGML_BACKEND_DL=OFF), merged into a single libqwen.dylib"
+            echo "Enabled backends: cpu (armv8.2-a+dotprod), metal, blas=${{ github.event.inputs.maccatalyst_blas }}"
+            echo ""
+            echo "Mac Catalyst qwentts artifact contents:"
+            echo "Apple Silicon only: no x86_64 slice is produced, so this runtime does not load on Intel Macs. Add a maccatalyst-x64 build if Intel support is needed again."
+            echo "Static linkage: qwen-core, ggml and every backend are archived into libqwen.dylib and registered at runtime by ggml's backend registry; nothing is dlopen'd, so the app bundle contains a single Mach-O to sign."
+            echo "CPU targets the M1 baseline (armv8.2-a+dotprod). GGML_CPU_ALL_VARIANTS is intentionally NOT used because it requires GGML_BACKEND_DL; M1 and every later Apple Silicon chip run this baseline."
+            echo "Metal uses GGML_METAL_EMBED_LIBRARY so the shader source travels inside libqwen.dylib; no default.metallib has to be deployed or located in the app bundle."
+            echo "Metal targets the Apple Silicon unified-memory GPU only; Intel integrated and AMD discrete GPUs are out of scope for this artifact."
+            echo "CUDA and Vulkan are unavailable on Mac Catalyst and are explicitly disabled."
+            echo ""
+            echo "libqwen.dylib sha256: ${libsha256}"
+            echo "Artifact contents:"
+            (cd "$out" && ls | sort)
+          } > "$manifest"
+
+          cat "$manifest"
+
+      - name: Upload Mac Catalyst artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: qwentts-${{ env.RID }}-${{ github.event.inputs.configuration }}
+          path: out/runtimes/${{ env.RID }}/native/
           if-no-files-found: error
