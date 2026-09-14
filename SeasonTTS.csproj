@@ -1,4 +1,4 @@
-<Project Sdk="Microsoft.NET.Sdk">
+﻿<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
     <ImplicitUsings>enable</ImplicitUsings>
@@ -54,6 +54,7 @@
 	  <None Include="THIRD-PARTY-NOTICES.md" Pack="true" PackagePath="\" />
 
 	  <None Include="runtimes\win-x64\native\*" Pack="true" PackagePath="runtimes/win-x64/native/" Condition="Exists('runtimes\win-x64\native')" />
+	  <None Include="runtimes\maccatalyst-arm64\native\*" Pack="true" PackagePath="runtimes/maccatalyst-arm64/native/" Condition="Exists('runtimes\maccatalyst-arm64\native')" />
 
 	  <ProjectReference Include="..\SeasonGGML\SeasonGGML.csproj" />
   </ItemGroup>
@@ -65,6 +66,24 @@
 			<Link>%(Filename)%(Extension)</Link>
 			<Pack>true</Pack>
 			<PackagePath>runtimes/%(RecursiveDir)%(Filename)%(Extension)</PackagePath>
+		</Content>
+	</ItemGroup>
+
+	<!--
+	  Mac Catalyst: the Qwen TTS GGML runtime is merged into a single self-contained
+	  libqwen.dylib (ggml is statically linked in, see otool -L: no libggml dependency).
+	  QwenNative.cs P/Invokes "libqwen" on this platform, so the dylib must be shipped
+	  in the app bundle; the Apple SDK classifies it as a dynamic library and places it
+	  under Contents/MonoBundle where the runtime resolves it.
+	  Only the dylib itself is Content: the folder also holds qwen.h, qwentts.txt,
+	  ggml.txt and README.txt, which have no place in an app bundle (and the Apple SDK
+	  warns it cannot compute a PublishFolderType for them).
+	-->
+	<ItemGroup Condition="'$(IsMacCatalyst)' == 'true'">
+		<Content Include="runtimes\maccatalyst-arm64\native\libqwen.dylib" Condition="Exists('runtimes\maccatalyst-arm64\native\libqwen.dylib')">
+			<CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+			<Link>%(Filename)%(Extension)</Link>
+			<Pack>false</Pack>
 		</Content>
 	</ItemGroup>
 
