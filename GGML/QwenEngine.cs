@@ -265,16 +265,9 @@ public sealed unsafe class QwenEngine : IDisposable
         var marshal = new SynthesizeMarshal(this, text, lang, speaker, instruct,
             refAudio24k, refText, refSpkEmb, refCodes, cancellationToken);
 
-        // Keep delegate alive for the duration of the call.
-        QtAudioChunkCallback chunkDel = (samples, nSamples, _) =>
-        {
-            var arr = new float[nSamples];
-            fixed (float* dst = arr)
-                Buffer.MemoryCopy(samples, dst, nSamples * sizeof(float), nSamples * sizeof(float));
-            onChunk(arr, nSamples);
-            return 1; // continue
-        };
-        GCHandle chunkHandle = GCHandle.Alloc(chunkDel);
+        // Root the managed callback for the duration of the native call; the native
+        // side reaches it through OnChunkUserData.
+        GCHandle chunkHandle = onChunk is not null ? GCHandle.Alloc(onChunk) : default;
 
         try
         {
@@ -305,8 +298,8 @@ public sealed unsafe class QwenEngine : IDisposable
             p.RefT                = marshal.RefT;
             p.CodecChunkSec       = codecChunkSec;
             p.CodecLeftContextSec = codecLeftContextSec;
-            p.OnChunk             = Marshal.GetFunctionPointerForDelegate(chunkDel);
-            p.OnChunkUserData     = IntPtr.Zero;
+            p.OnChunk             = Marshal.GetFunctionPointerForDelegate(s_chunkThunk);
+            p.OnChunkUserData     = chunkHandle.IsAllocated ? GCHandle.ToIntPtr(chunkHandle) : IntPtr.Zero;
 
             if (marshal.CancelHandle != null)
             {
@@ -320,9 +313,32 @@ public sealed unsafe class QwenEngine : IDisposable
         }
         finally
         {
-            chunkHandle.Free();
+            if (chunkHandle.IsAllocated) chunkHandle.Free();
             marshal.Dispose();
         }
+    }
+
+    private static readonly QtAudioChunkCallback s_chunkThunk = ChunkThunk;
+
+    // Static thunk with MonoPInvokeCallback so the AOT compiler pre-generates the
+    // native-to-managed wrapper. A lambda would need that wrapper JIT-compiled on
+    // first use, which aborts aot-only Release builds with
+    // "Attempting to JIT compile method '(wrapper native-to-managed) ...'".
+#if IOS || MACCATALYST
+    [ObjCRuntime.MonoPInvokeCallback(typeof(QtAudioChunkCallback))]
+#endif
+    private static int ChunkThunk(float* samples, int nSamples, IntPtr userData)
+    {
+        if (userData != IntPtr.Zero &&
+            GCHandle.FromIntPtr(userData).Target is Action<float[], int> onChunk)
+        {
+            var arr = new float[nSamples];
+            fixed (float* dst = arr)
+                Buffer.MemoryCopy(samples, dst, nSamples * sizeof(float), nSamples * sizeof(float));
+            onChunk(arr, nSamples);
+        }
+
+        return 1; // continue
     }
 
     // ── Queries ────────────────────────────────────────────────────
@@ -398,8 +414,7 @@ public sealed unsafe class QwenEngine : IDisposable
         _logCallback = callback;
         if (callback != null)
         {
-            _logCallbackDelegate = (level, msg, _) =>
-                callback((QtLogLevel)level, Marshal.PtrToStringUTF8((IntPtr)msg) ?? "");
+            _logCallbackDelegate = LogThunk;
             QwenNative.qt_log_set(
                 Marshal.GetFunctionPointerForDelegate(_logCallbackDelegate),
                 IntPtr.Zero);
@@ -409,6 +424,18 @@ public sealed unsafe class QwenEngine : IDisposable
             _logCallbackDelegate = null;
             QwenNative.qt_log_set(IntPtr.Zero, IntPtr.Zero);
         }
+    }
+
+    // Static thunk with MonoPInvokeCallback so the AOT compiler pre-generates the
+    // native-to-managed wrapper. A lambda would need that wrapper JIT-compiled on
+    // first use, which aborts aot-only Release builds with
+    // "Attempting to JIT compile method '(wrapper native-to-managed) ...'".
+#if IOS || MACCATALYST
+    [ObjCRuntime.MonoPInvokeCallback(typeof(QtLogCallback))]
+#endif
+    private static void LogThunk(int level, byte* msg, IntPtr userData)
+    {
+        _logCallback?.Invoke((QtLogLevel)level, Marshal.PtrToStringUTF8((IntPtr)msg) ?? "");
     }
 
     // ── Disposal ───────────────────────────────────────────────────
@@ -596,13 +623,17 @@ public sealed unsafe class QwenEngine : IDisposable
         private readonly CancellationTokenRegistration _reg;
         private readonly QtCancelCallback              _del;
         private          GCHandle                      _selfHandle;
+        private readonly CancellationToken             _ct;
 
         public IntPtr FuncPtr  { get; }
         public IntPtr TokenPtr { get; }
 
+        internal bool IsCancellationRequested => _ct.IsCancellationRequested;
+
         public CancelHandle(CancellationToken ct)
         {
-            _del = _ => ct.IsCancellationRequested ? 1 : 0;
+            _ct = ct;
+            _del = CancelThunk;
             _selfHandle = GCHandle.Alloc(this);
             FuncPtr  = Marshal.GetFunctionPointerForDelegate(_del);
             TokenPtr = GCHandle.ToIntPtr(_selfHandle);
@@ -615,5 +646,21 @@ public sealed unsafe class QwenEngine : IDisposable
             if (_selfHandle.IsAllocated)
                 _selfHandle.Free();
         }
+    }
+
+    // Static thunk with MonoPInvokeCallback so the AOT compiler pre-generates the
+    // native-to-managed wrapper. A lambda would need that wrapper JIT-compiled on
+    // first use, which aborts aot-only Release builds with
+    // "Attempting to JIT compile method '(wrapper native-to-managed) ...'".
+#if IOS || MACCATALYST
+    [ObjCRuntime.MonoPInvokeCallback(typeof(QtCancelCallback))]
+#endif
+    private static int CancelThunk(IntPtr userData)
+    {
+        return userData != IntPtr.Zero &&
+               GCHandle.FromIntPtr(userData).Target is CancelHandle handle &&
+               handle.IsCancellationRequested
+            ? 1
+            : 0;
     }
 }
