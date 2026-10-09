@@ -39,6 +39,18 @@ on:
         options:
           - ON
           - OFF
+      ios_deployment_target:
+        description: "iOS deployment target for the device and simulator builds (forms the arm64-apple-ios<ver> triples)"
+        required: false
+        default: "17.0"
+      ios_blas:
+        description: "Build the Accelerate-backed BLAS backend for iOS"
+        required: false
+        type: choice
+        default: "ON"
+        options:
+          - ON
+          - OFF
       build_target:
         description: "Platform to build (one job per run)"
         required: true
@@ -46,6 +58,7 @@ on:
         default: "maccatalyst"
         options:
           - maccatalyst
+          - ios
           - windows
       build_parallel:
         description: "Parallel build jobs"
@@ -61,8 +74,8 @@ env:
 
 jobs:
   build-windows:
-    # Runs only when build_target is windows; build-maccatalyst is gated the same way,
-    # so exactly one build job executes per workflow run.
+    # Runs only when build_target is windows; every other build job is gated the same
+    # way, so exactly one build job executes per workflow run.
     if: github.event.inputs.build_target == 'windows'
     runs-on: windows-2022
     timeout-minutes: 240
@@ -335,8 +348,8 @@ jobs:
           if-no-files-found: error
 
   build-maccatalyst:
-    # Runs only when build_target is maccatalyst; build-windows is gated the same way,
-    # so exactly one build job executes per workflow run.
+    # Runs only when build_target is maccatalyst; every other build job is gated the
+    # same way, so exactly one build job executes per workflow run.
     if: github.event.inputs.build_target == 'maccatalyst'
     # Apple Silicon only: macos-15 is already arm64, so this is a native build.
     # Intel Macs (x86_64 / maccatalyst-x64) are deliberately not produced - see the
@@ -575,6 +588,297 @@ jobs:
           cat "$manifest"
 
       - name: Upload Mac Catalyst artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: qwentts-${{ env.RID }}-${{ github.event.inputs.configuration }}
+          path: out/runtimes/${{ env.RID }}/native/
+          if-no-files-found: error
+
+  build-ios:
+    # Runs only when build_target is ios; every other build job is gated the same
+    # way, so exactly one build job executes per workflow run.
+    if: github.event.inputs.build_target == 'ios'
+    # Apple Silicon only (same policy as the Mac Catalyst job): macos-15 is already
+    # arm64, so both slices are native builds. A single "arm64" iOS target does NOT
+    # also cover the simulator - device and simulator are distinct Mach-O platforms
+    # (LC_BUILD_VERSION reports IOS vs IOSSIMULATOR) built against different SDKs, so
+    # each needs its own compile. With Intel Macs out of scope the complete matrix is
+    # exactly two slices: device arm64 + simulator arm64; no x86_64 simulator slice is
+    # produced.
+    runs-on: macos-15
+    timeout-minutes: 240
+
+    env:
+      RID: ios-arm64
+      ARCH: arm64
+      MIN_IOS: ${{ github.event.inputs.ios_deployment_target }}
+      ENABLE_BLAS: ${{ github.event.inputs.ios_blas }}
+
+    steps:
+      - name: Clone qwentts.cpp
+        run: git clone --depth 1 --branch "${{ github.event.inputs.qwentts_ref }}" "https://github.com/${{ env.QWENTTS_REPO }}.git" qwentts
+
+      - name: Clone ggml fork
+        run: git clone --depth 1 --branch "${{ github.event.inputs.ggml_ref }}" "https://github.com/${{ env.GGML_REPO }}.git" qwentts/ggml
+
+      - name: Select Xcode
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+
+      - name: Install Ninja
+        run: |
+          if ! command -v ninja >/dev/null 2>&1; then
+            brew install ninja
+          fi
+          ninja --version
+
+      - name: Configure + build (iOS device arm64)
+        working-directory: qwentts
+        run: |
+          set -euo pipefail
+
+          # CMAKE_SYSTEM_NAME=iOS is CMake's first-class iOS cross-compilation mode:
+          # it selects the iphoneos SDK, the -mios-version-min flag and the arm64
+          # target triple, so no manual -target/-isysroot flags are needed (unlike the
+          # *-macabi build above, for which CMake has no system name to switch on).
+          # The behavioral flags mirror the Mac Catalyst job: one static, registry-
+          # driven runtime with CPU (M1 baseline), Metal and optional Accelerate BLAS.
+          cmake -S . -B build-ios-device -G Ninja \
+            -DCMAKE_SYSTEM_NAME=iOS \
+            -DCMAKE_OSX_SYSROOT=iphoneos \
+            -DCMAKE_OSX_ARCHITECTURES="${ARCH}" \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET="${MIN_IOS}" \
+            -DCMAKE_BUILD_TYPE="${{ github.event.inputs.configuration }}" \
+            -DBUILD_SHARED_LIBS=OFF \
+            -DQWEN_SHARED=OFF \
+            -DGGML_BUILD_TESTS=OFF \
+            -DGGML_BUILD_EXAMPLES=OFF \
+            -DGGML_BACKEND_DL=OFF \
+            -DGGML_NATIVE=OFF \
+            -DGGML_CPU=ON \
+            -DGGML_CPU_ARM_ARCH=armv8.2-a+dotprod \
+            -DGGML_ACCELERATE=ON \
+            -DGGML_METAL=ON \
+            -DGGML_METAL_EMBED_LIBRARY=ON \
+            -DGGML_METAL_NDEBUG=ON \
+            -DGGML_BLAS="${ENABLE_BLAS}" \
+            -DGGML_BLAS_VENDOR=Apple \
+            -DGGML_OPENMP=OFF \
+            -DGGML_CUDA=OFF \
+            -DGGML_VULKAN=OFF
+
+          cmake --build build-ios-device --parallel "${{ github.event.inputs.build_parallel }}"
+
+      - name: Configure + build (iOS simulator arm64)
+        working-directory: qwentts
+        run: |
+          set -euo pipefail
+
+          # Same configuration against the iphonesimulator SDK. On Apple Silicon Macs
+          # (the only in-scope debug hosts) the simulator runs the arm64 slice, so
+          # arm64 is the only simulator architecture that is produced.
+          cmake -S . -B build-ios-simulator -G Ninja \
+            -DCMAKE_SYSTEM_NAME=iOS \
+            -DCMAKE_OSX_SYSROOT=iphonesimulator \
+            -DCMAKE_OSX_ARCHITECTURES="${ARCH}" \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET="${MIN_IOS}" \
+            -DCMAKE_BUILD_TYPE="${{ github.event.inputs.configuration }}" \
+            -DBUILD_SHARED_LIBS=OFF \
+            -DQWEN_SHARED=OFF \
+            -DGGML_BUILD_TESTS=OFF \
+            -DGGML_BUILD_EXAMPLES=OFF \
+            -DGGML_BACKEND_DL=OFF \
+            -DGGML_NATIVE=OFF \
+            -DGGML_CPU=ON \
+            -DGGML_CPU_ARM_ARCH=armv8.2-a+dotprod \
+            -DGGML_ACCELERATE=ON \
+            -DGGML_METAL=ON \
+            -DGGML_METAL_EMBED_LIBRARY=ON \
+            -DGGML_METAL_NDEBUG=ON \
+            -DGGML_BLAS="${ENABLE_BLAS}" \
+            -DGGML_BLAS_VENDOR=Apple \
+            -DGGML_OPENMP=OFF \
+            -DGGML_CUDA=OFF \
+            -DGGML_VULKAN=OFF
+
+          cmake --build build-ios-simulator --parallel "${{ github.event.inputs.build_parallel }}"
+
+      - name: Merge static archives into a single libqwen.a per slice
+        working-directory: qwentts
+        run: |
+          set -euo pipefail
+
+          # qwen-core is always a static library; with QWEN_SHARED=OFF and
+          # GGML_BACKEND_DL=OFF every ggml piece is a separate .a as well. Merge each
+          # slice's archives into ONE libqwen.a with libtool: SeasonTTS P/Invokes the
+          # qwentts ABI as "__Internal" on iOS, so the app statically links this single
+          # archive via NativeReference (Kind=Static) - one file keeps the consumer
+          # wiring (and the archive order) trivial.
+          merge_slice() {
+            local build_dir="$1"
+            local out_dir="$2"
+            mkdir -p "$out_dir"
+
+            local archives=""
+            for a in libqwen-core.a libggml-base.a libggml.a libggml-cpu.a libggml-metal.a libggml-blas.a; do
+              found="$(find "$build_dir" -name "$a" | head -n1)"
+              if [ -n "$found" ]; then
+                archives="${archives} ${found}"
+              fi
+            done
+
+            # qwen-core and the ggml core archives are mandatory; the backend archives
+            # depend on the enabled backends, so only their absence for a required
+            # backend would surface later.
+            for req in libqwen-core.a libggml-base.a libggml.a libggml-cpu.a libggml-metal.a; do
+              if ! find "$build_dir" -name "$req" | grep -q .; then
+                echo "Required static archive is missing in ${build_dir}: $req" >&2
+                exit 1
+              fi
+            done
+
+            # shellcheck disable=SC2086
+            libtool -static -o "${out_dir}/libqwen.a" ${archives}
+          }
+
+          rm -rf merged
+          merge_slice build-ios-device merged/device
+          merge_slice build-ios-simulator merged/simulator
+
+      - name: Create libqwen.xcframework
+        working-directory: qwentts
+        run: |
+          set -euo pipefail
+
+          # One xcframework carries both slices; xcodebuild classifies each library by
+          # its LC_BUILD_VERSION platform tag (ios-arm64 / ios-arm64-simulator), which
+          # also implicitly re-validates that the device and simulator builds did not
+          # get mixed up.
+          xcodebuild -create-xcframework \
+            -library merged/device/libqwen.a \
+            -library merged/simulator/libqwen.a \
+            -output merged/libqwen.xcframework
+
+      - name: Verify slices
+        working-directory: qwentts
+        run: |
+          set -euo pipefail
+
+          verify_slice() {
+            local lib="$1"
+            local probe_root="$2"
+            local platform_tag="$3"
+
+            local archInfo
+            archInfo="$(lipo -info "$lib")"
+            if ! echo "$archInfo" | grep -q "${ARCH}"; then
+              echo "Missing ${ARCH} slice in ${lib}: ${archInfo}" >&2
+              exit 1
+            fi
+            if echo "$archInfo" | grep -q 'x86_64\|i386'; then
+              echo "Unexpected Intel slice in ${lib}: ${archInfo}" >&2
+              exit 1
+            fi
+
+            # The LC_BUILD_VERSION platform tag must say IOS (device) or IOSSIMULATOR
+            # (simulator; anchored so "IOS" cannot match inside "IOSSIMULATOR"). A
+            # plain macOS build or a device/simulator mix-up links on the runner but
+            # breaks the app build downstream.
+            local probe
+            probe="$(find "$probe_root" -name "*.o" | head -n1)"
+            if [ -z "$probe" ]; then
+              echo "No object file under ${probe_root} to verify the platform tag" >&2
+              exit 1
+            fi
+            if ! xcrun vtool -show-build-version "$probe" | grep -q " ${platform_tag}$"; then
+              echo "Platform tag mismatch in ${lib} (expected ${platform_tag}):" >&2
+              xcrun vtool -show-build-version "$probe" >&2
+              exit 1
+            fi
+          }
+
+          verify_slice merged/device/libqwen.a build-ios-device IOS
+          verify_slice merged/simulator/libqwen.a build-ios-simulator IOSSIMULATOR
+
+          # The merged archives must export the QT_API entry points SeasonTTS
+          # P/Invokes; a dropped backend object or an unresolved symbol shows up as a
+          # missing export here. Read nm once into a variable and match with a
+          # here-string: piping nm into grep -q lets grep close the pipe on the first
+          # match, which makes llvm-nm abort with "Broken pipe" and, under set -o
+          # pipefail, fails the whole pipeline even though the symbol was found.
+          for lib in merged/device/libqwen.a merged/simulator/libqwen.a; do
+            nmOut="$(nm -g "$lib")"
+            for sym in _qt_version _qt_init _qt_free _qt_synthesize _qt_tts_default_params _qt_audio_free; do
+              if ! grep -q " ${sym}$" <<< "$nmOut"; then
+                echo "Merged library does not export ${sym}: ${lib}" >&2
+                exit 1
+              fi
+            done
+          done
+
+      - name: Collect artifacts
+        run: |
+          set -euo pipefail
+
+          out="out/runtimes/${RID}/native"
+          mkdir -p "$out"
+
+          cp qwentts/src/qwen.h "$out/qwen.h"
+          if [ -f "qwentts/LICENSE" ]; then
+            cp "qwentts/LICENSE" "$out/qwentts.txt"
+          fi
+          if [ -f "qwentts/ggml/LICENSE" ]; then
+            cp "qwentts/ggml/LICENSE" "$out/ggml.txt"
+          fi
+
+          rm -rf "$out/libqwen.xcframework"
+          cp -R qwentts/merged/libqwen.xcframework "$out/libqwen.xcframework"
+
+          if [ ! -f "$out/libqwen.xcframework/ios-arm64/libqwen.a" ] ||
+             [ ! -f "$out/libqwen.xcframework/ios-arm64-simulator/libqwen.a" ]; then
+            echo "Required qwentts runtime is missing from the xcframework" >&2
+            ls -R "$out/libqwen.xcframework" >&2
+            exit 1
+          fi
+
+          # Record the archive checksums so they can be verified after download.
+          # Transferring binaries through text-mode channels (sync tools, text
+          # editors, some file shares) corrupts the Mach-O headers; this is how a
+          # downstream user detects that before it reaches a device.
+          devSha=$(shasum -a 256 "$out/libqwen.xcframework/ios-arm64/libqwen.a" | awk '{print $1}')
+          simSha=$(shasum -a 256 "$out/libqwen.xcframework/ios-arm64-simulator/libqwen.a" | awk '{print $1}')
+
+          manifest="$out/README.txt"
+          {
+            echo "Platform: ${RID} (xcframework carrying the device and arm64-simulator slices)"
+            echo "Configuration: ${{ github.event.inputs.configuration }}"
+            echo "QWENTTS_REPO: https://github.com/${{ env.QWENTTS_REPO }}"
+            echo "QWENTTS_REF: ${{ github.event.inputs.qwentts_ref }}"
+            echo "GGML_REPO: https://github.com/${{ env.GGML_REPO }}"
+            echo "GGML_REF: ${{ github.event.inputs.ggml_ref }}"
+            echo "Target triples: arm64-apple-ios${{ github.event.inputs.ios_deployment_target }} (device), arm64-apple-ios${{ github.event.inputs.ios_deployment_target }}-simulator (simulator)"
+            echo "Linkage: static (QWEN_SHARED=OFF, GGML_BACKEND_DL=OFF), merged into a single libqwen.a per slice"
+            echo "Enabled backends: cpu (armv8.2-a+dotprod), metal, blas=${{ github.event.inputs.ios_blas }}"
+            echo ""
+            echo "iOS qwentts artifact contents:"
+            echo "Two slices only, both arm64: ios-arm64 (device) and ios-arm64-simulator (Apple Silicon Macs). One arm64 iOS target does NOT also cover the simulator - device and simulator are distinct Mach-O platforms; no x86_64 simulator slice is produced, Intel Macs are out of scope."
+            echo "SeasonTTS declares the qwentts P/Invokes as __Internal on iOS (unlike the libqwen dylib used on Linux/Mac Catalyst), so the app statically links libqwen.a via NativeReference (Kind=Static)."
+            echo "Static linkage: qwen-core, ggml and every backend are archived into the single libqwen.a and registered at runtime by ggml's backend registry; nothing is dlopen'd."
+            echo "CPU targets the M1 baseline (armv8.2-a+dotprod), supported by every A12+ device and every Apple Silicon simulator."
+            echo "Metal uses GGML_METAL_EMBED_LIBRARY so the shader source travels inside libqwen.a; no default.metallib has to be deployed or located in the app bundle."
+            echo "BLAS uses Apple's Accelerate framework (GGML_BLAS_VENDOR=Apple), which is available on both iOS devices and simulators."
+            echo "CUDA and Vulkan are unavailable on iOS and are explicitly disabled."
+            echo ""
+            echo "libqwen.a sha256 (ios-arm64): ${devSha}"
+            echo "libqwen.a sha256 (ios-arm64-simulator): ${simSha}"
+            echo "Artifact contents:"
+            (cd "$out" && find . | sort)
+          } > "$manifest"
+
+          cat "$manifest"
+
+      - name: Upload iOS artifacts
         uses: actions/upload-artifact@v4
         with:
           name: qwentts-${{ env.RID }}-${{ github.event.inputs.configuration }}
