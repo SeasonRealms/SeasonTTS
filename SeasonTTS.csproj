@@ -56,6 +56,16 @@
 	  <None Include="runtimes\win-x64\native\*" Pack="true" PackagePath="runtimes/win-x64/native/" Condition="Exists('runtimes\win-x64\native')" />
 	  <None Include="runtimes\maccatalyst-arm64\native\*" Pack="true" PackagePath="runtimes/maccatalyst-arm64/native/" Condition="Exists('runtimes\maccatalyst-arm64\native')" />
 
+	  <!--
+	    iOS ships a static libqwen.xcframework (ios-arm64 device + ios-arm64-simulator
+	    slices, built by build-qwentts.yml). Unlike the Mac Catalyst dylib it is LINKED
+	    into the consuming app (QwenNative.cs declares the P/Invokes as "__Internal" on
+	    iOS), never copied into the bundle, so there is deliberately no Content item for
+	    it here; the app project wires the NativeReference (see SeasonStudio.csproj).
+	    The ** glob keeps the xcframework directory layout inside the NuGet package.
+	  -->
+	  <None Include="runtimes\ios-arm64\native\**" Pack="true" PackagePath="runtimes/ios-arm64/native/%(RecursiveDir)%(Filename)%(Extension)" Condition="Exists('runtimes\ios-arm64\native')" />
+
 	  <ProjectReference Include="..\SeasonGGML\SeasonGGML.csproj" />
   </ItemGroup>
 
