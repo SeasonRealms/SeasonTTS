@@ -55,6 +55,7 @@
 
 	  <None Include="runtimes\win-x64\native\*" Pack="true" PackagePath="runtimes/win-x64/native/" Condition="Exists('runtimes\win-x64\native')" />
 	  <None Include="runtimes\maccatalyst-arm64\native\*" Pack="true" PackagePath="runtimes/maccatalyst-arm64/native/" Condition="Exists('runtimes\maccatalyst-arm64\native')" />
+	  <None Include="runtimes\linux-x64\native\*" Exclude="runtimes\linux-x64\native\*.h;runtimes\linux-x64\native\*.txt" Pack="true" PackagePath="runtimes/linux-x64/native/" Condition="Exists('runtimes\linux-x64\native')" />
 
 	  <!--
 	    iOS ships a static libqwen.xcframework (ios-arm64 device + ios-arm64-simulator
@@ -76,6 +77,20 @@
 			<Link>%(Filename)%(Extension)</Link>
 			<Pack>true</Pack>
 			<PackagePath>runtimes/%(RecursiveDir)%(Filename)%(Extension)</PackagePath>
+		</Content>
+	</ItemGroup>
+
+	<!--
+	  Linux: copy the shared objects directly to output root (next to the managed
+	  dll). Only the .so files travel: the folder also holds .h/.txt (ABI reference
+	  and license material) which have no place in a deployed .NET app - and would
+	  collide, since every AI package ships its own README.txt/ggml.txt.
+	-->
+	<ItemGroup Condition="'$(IsLinux)' == 'true'">
+		<Content Include="runtimes\linux-x64\native\*" Exclude="runtimes\linux-x64\native\*.h;runtimes\linux-x64\native\*.txt" Condition="Exists('runtimes\linux-x64\native')">
+			<CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+			<Link>%(Filename)%(Extension)</Link>
+			<Pack>false</Pack>
 		</Content>
 	</ItemGroup>
 
