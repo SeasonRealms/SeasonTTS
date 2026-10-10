@@ -20,11 +20,11 @@ on:
         required: false
         default: "master"
       cuda_version:
-        description: "CUDA Toolkit version for the Windows build"
+        description: "CUDA Toolkit version for the Windows and Linux builds"
         required: false
         default: "12.8.1"
       cuda_architectures:
-        description: "CUDA architectures for the Windows CMake build"
+        description: "CUDA architectures for the Windows and Linux CMake builds"
         required: false
         default: "75-virtual;80-real;86-real;89-real;90-virtual"
       maccatalyst_min_ios:
@@ -60,6 +60,7 @@ on:
           - maccatalyst
           - ios
           - windows
+          - linux
       build_parallel:
         description: "Parallel build jobs"
         required: false
@@ -345,6 +346,122 @@ jobs:
         with:
           name: qwentts-win-x64-${{ github.event.inputs.configuration }}
           path: out/runtimes/win-x64/native/
+          if-no-files-found: error
+
+  build-linux:
+    # Runs only when build_target is linux; every other build job is gated the
+    # same way, so exactly one build job executes per workflow run.
+    if: github.event.inputs.build_target == 'linux'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 240
+    steps:
+      - name: Clone qwentts.cpp
+        run: git clone --depth 1 --branch "${{ github.event.inputs.qwentts_ref }}" "https://github.com/${{ env.QWENTTS_REPO }}.git" qwentts
+
+      - name: Clone ggml fork
+        run: git clone --depth 1 --branch "${{ github.event.inputs.ggml_ref }}" "https://github.com/${{ env.GGML_REPO }}.git" qwentts/ggml
+
+      # Same build-time toolchain as the Windows job: Vulkan SDK for ggml-vulkan
+      # (provides glslc) and CUDA Toolkit for ggml-cuda (nvcc + cudart + cuBLAS).
+      # The toolkit is build-time only: CUDA runtimes are NOT bundled into the
+      # artifact (mirroring Windows, where cudacudnn-runtime is packaged
+      # separately). Users install CUDA 12.x system-wide per the documented
+      # guidance, so no CUDA .so files are collected.
+      - name: Install Vulkan SDK
+        uses: jakoch/install-vulkan-sdk-action@v1
+
+      # Linux sub-package names get the "cuda-" prefix added automatically
+      # (nvcc -> cuda-nvcc), while the cuBLAS packages live outside that
+      # namespace and must be requested through non-cuda-sub-packages.
+      - name: Install CUDA Toolkit
+        uses: Jimver/cuda-toolkit@v0.2.35
+        with:
+          cuda: "${{ github.event.inputs.cuda_version }}"
+          method: network
+          sub-packages: '["nvcc", "cudart-dev"]'
+          non-cuda-sub-packages: '["libcublas", "libcublas-dev"]'
+
+      - name: Configure CMake
+        working-directory: qwentts
+        run: |
+          cmake -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE="${{ github.event.inputs.configuration }}" \
+            -DBUILD_SHARED_LIBS=ON \
+            -DQWEN_SHARED=ON \
+            -DGGML_BUILD_TESTS=OFF \
+            -DGGML_BUILD_EXAMPLES=OFF \
+            -DGGML_NATIVE=OFF \
+            -DGGML_CPU_ALL_VARIANTS=ON \
+            -DGGML_CUDA=ON \
+            -DGGML_VULKAN=ON \
+            -DGGML_BACKEND_DL=ON \
+            -DGGML_CUDA_CUB_3DOT2=ON \
+            -DCMAKE_CUDA_ARCHITECTURES="${{ github.event.inputs.cuda_architectures }}"
+
+      - name: Build
+        working-directory: qwentts
+        run: |
+          cmake --build build --config "${{ github.event.inputs.configuration }}" --parallel "${{ github.event.inputs.build_parallel }}"
+
+      - name: Collect artifacts
+        run: |
+          set -euo pipefail
+          out="out/runtimes/linux-x64/native"
+          mkdir -p "$out"
+
+          # Dereference the SONAME symlink chains so the artifact carries real
+          # files under every name that dlopen and the linker-recorded SONAMEs
+          # look for at runtime.
+          find qwentts/build -name 'libqwen.so*' -exec cp -Lf {} "$out/" \;
+          find qwentts/build -name 'libggml*.so*' -exec cp -Lf {} "$out/" \;
+
+          if [ ! -f "$out/libqwen.so" ]; then
+            echo "libqwen.so not found" >&2
+            exit 1
+          fi
+
+          for name in libggml.so libggml-base.so libggml-cuda.so libggml-vulkan.so; do
+            if [ ! -f "$out/$name" ]; then
+              echo "Required GGML runtime is missing: $name" >&2
+              exit 1
+            fi
+          done
+
+          cpu_backends=$(find "$out" -maxdepth 1 -type f -name 'libggml-cpu*.so' | sort)
+          if [ -z "$cpu_backends" ]; then
+            echo "No CPU GGML backend variants were produced." >&2
+            exit 1
+          fi
+
+          # Public header for binding consumers
+          cp qwentts/src/qwen.h "$out"
+
+          {
+            echo "Platform: linux-x64"
+            echo "Configuration: ${{ github.event.inputs.configuration }}"
+            echo "QWENTTS_REF: ${{ github.event.inputs.qwentts_ref }}"
+            echo "GGML_REPO: ${{ env.GGML_REPO }}"
+            echo "GGML_REF: ${{ github.event.inputs.ggml_ref }}"
+            echo "CUDA Toolkit version (build time only): ${{ github.event.inputs.cuda_version }}"
+            echo "Enabled backends: cpu-all-variants, cuda12, vulkan"
+            echo ""
+            echo "Linux qwentts artifact contents:"
+            echo "CPU uses GGML_CPU_ALL_VARIANTS with GGML_BACKEND_DL so one runtime can expose multiple x86 CPU variants and let ggml choose the best supported backend at runtime."
+            echo ""
+            echo "CUDA runtimes are NOT bundled: install CUDA 12.x system-wide for the CUDA backend (qwentts.cpp is transformer-based, so cuDNN is never loaded)."
+            echo ""
+            echo "CPU backend libraries:"
+            echo "$cpu_backends"
+            echo ""
+            echo "Artifact contents:"
+            (cd "$out" && ls -1 | sort)
+          } > "$out/README.txt"
+
+      - name: Upload Linux artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: qwentts-linux-x64-${{ github.event.inputs.configuration }}
+          path: out/runtimes/linux-x64/native/
           if-no-files-found: error
 
   build-maccatalyst:
