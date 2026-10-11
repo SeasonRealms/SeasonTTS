@@ -51,6 +51,10 @@ on:
         options:
           - ON
           - OFF
+      android_ndk_version:
+        description: "Android NDK version for the android build (r28+ required: 16 KB page-size support)"
+        required: false
+        default: "28.2.13676358"
       build_target:
         description: "Platform to build (one job per run)"
         required: true
@@ -61,6 +65,7 @@ on:
           - ios
           - windows
           - linux
+          - android
       build_parallel:
         description: "Parallel build jobs"
         required: false
@@ -1031,6 +1036,209 @@ jobs:
           cat "$manifest"
 
       - name: Upload iOS artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: qwentts-${{ env.RID }}-${{ github.event.inputs.configuration }}
+          path: out/runtimes/${{ env.RID }}/native/
+          if-no-files-found: error
+
+  build-android:
+    # Runs only when build_target is android; every other build job is gated the
+    # same way, so exactly one build job executes per workflow run.
+    if: github.event.inputs.build_target == 'android'
+    # arm64-v8a only: 64-bit real devices are the single supported target, so
+    # no emulator (x86_64) and no 32-bit (armeabi-v7a) slice is produced.
+    runs-on: ubuntu-22.04
+    timeout-minutes: 240
+
+    env:
+      RID: android-arm64
+      ABI: arm64-v8a
+      ANDROID_API: "33"
+
+    steps:
+      - name: Clone qwentts.cpp
+        run: git clone --depth 1 --branch "${{ github.event.inputs.qwentts_ref }}" "https://github.com/${{ env.QWENTTS_REPO }}.git" qwentts
+
+      - name: Clone ggml fork
+        run: git clone --depth 1 --branch "${{ github.event.inputs.ggml_ref }}" "https://github.com/${{ env.GGML_REPO }}.git" qwentts/ggml
+
+      # The runner may carry only older NDKs, and the 16 KB page-size default
+      # the Play deadline depends on exists from r28 on, so the requested NDK
+      # is installed through the preinstalled sdkmanager and the r28 floor is
+      # enforced here instead of silently building with an older toolchain.
+      - name: Install Android NDK
+        run: |
+          set -euo pipefail
+          NDK_VERSION="${{ github.event.inputs.android_ndk_version }}"
+          SDK_ROOT="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-/usr/local/lib/android/sdk}}"
+          SDKMANAGER="${SDK_ROOT}/cmdline-tools/latest/bin/sdkmanager"
+          NDK_DIR="${SDK_ROOT}/ndk/${NDK_VERSION}"
+
+          if [ ! -d "${NDK_DIR}" ]; then
+            if [ ! -x "${SDKMANAGER}" ]; then
+              echo "sdkmanager not found at ${SDKMANAGER}" >&2
+              exit 1
+            fi
+            yes | "${SDKMANAGER}" --licenses > /dev/null || true
+            "${SDKMANAGER}" --install "ndk;${NDK_VERSION}"
+          fi
+
+          NDK_MAJOR="$(sed -n 's/^Pkg.Revision = \([0-9]*\).*/\1/p' "${NDK_DIR}/source.properties")"
+          if [ -z "${NDK_MAJOR}" ] || [ "${NDK_MAJOR}" -lt 28 ]; then
+            echo "Android NDK r28+ is required (16 KB page-size support), found '${NDK_MAJOR:-unknown}' in ${NDK_DIR}" >&2
+            exit 1
+          fi
+
+          echo "ANDROID_NDK_HOME=${NDK_DIR}" >> "$GITHUB_ENV"
+          echo "Using Android NDK ${NDK_VERSION} at ${NDK_DIR}"
+
+      - name: Configure CMake (Android)
+        working-directory: qwentts
+        run: |
+          # Cross-compilation goes through the NDK toolchain file (NDK clang +
+          # sysroot for ${ABI}), and ANDROID_PLATFORM matches the app's minSdk.
+          # ANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES=ON is the NDK r27+ switch behind
+          # -Wl,-z,max-page-size=16384 (already the r28 default; passed
+          # explicitly so the 16 KB intent survives toolchain changes and is
+          # re-verified post-build).
+          # The backend model differs from Windows/Linux: CPU is the only
+          # backend (no CUDA/Vulkan on Android), and GGML_BACKEND_DL=OFF keeps
+          # it a plain shared library linked into libggml.so via DT_NEEDED, so
+          # the registry self-registers at load time (same runtime model as the
+          # iOS build) and the app only loads libqwen.so - no backend directory
+          # scan or dlopen bookkeeping on the .NET side. The CPU baseline
+          # (armv8.2-a+dotprod, M1/Apple-A14 class) matches the iOS build.
+          cmake -B build-android -G Ninja \
+            -DCMAKE_TOOLCHAIN_FILE="${ANDROID_NDK_HOME}/build/cmake/android.toolchain.cmake" \
+            -DANDROID_ABI="${ABI}" \
+            -DANDROID_PLATFORM="android-${ANDROID_API}" \
+            -DANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES=ON \
+            -DCMAKE_BUILD_TYPE="${{ github.event.inputs.configuration }}" \
+            -DCMAKE_C_FLAGS="-DGGML_MAX_NAME=128" \
+            -DCMAKE_CXX_FLAGS="-DGGML_MAX_NAME=128" \
+            -DBUILD_SHARED_LIBS=ON \
+            -DQWEN_SHARED=ON \
+            -DGGML_BUILD_TESTS=OFF \
+            -DGGML_BUILD_EXAMPLES=OFF \
+            -DGGML_BACKEND_DL=OFF \
+            -DGGML_NATIVE=OFF \
+            -DGGML_CPU=ON \
+            -DGGML_CPU_ARM_ARCH=armv8.2-a+dotprod \
+            -DGGML_OPENMP=OFF \
+            -DGGML_CUDA=OFF \
+            -DGGML_VULKAN=OFF
+
+      - name: Build
+        working-directory: qwentts
+        run: |
+          cmake --build build-android --config "${{ github.event.inputs.configuration }}" --parallel "${{ github.event.inputs.build_parallel }}"
+
+      - name: Collect artifacts
+        run: |
+          set -euo pipefail
+          out="out/runtimes/${RID}/native"
+          mkdir -p "$out"
+
+          # The NDK toolchain has no versioned SONAMEs (CMake's VERSION/
+          # SOVERSION turn into plain lib<name>.so files - exactly the names
+          # the Android linker resolves inside the APK), so the -L glob copy
+          # only defends against toolchain changes that would reintroduce the
+          # Linux-style symlink chain.
+          find qwentts/build-android -name 'libqwen.so*' -exec cp -Lf {} "$out/" \;
+          find qwentts/build-android -name 'libggml*.so*' -exec cp -Lf {} "$out/" \;
+
+          if [ ! -f "$out/libqwen.so" ]; then
+            echo "libqwen.so not found" >&2
+            exit 1
+          fi
+
+          for name in libggml.so libggml-base.so libggml-cpu.so; do
+            if [ ! -f "$out/$name" ]; then
+              echo "Required GGML runtime is missing: $name" >&2
+              exit 1
+            fi
+          done
+
+          # Public header for binding consumers
+          cp qwentts/src/qwen.h "$out"
+          cp qwentts/LICENSE "$out/qwentts.txt"
+          if [ -f qwentts/ggml/LICENSE ]; then
+            cp qwentts/ggml/LICENSE "$out/ggml.txt"
+          fi
+
+          {
+            echo "Platform: ${RID} (ABI: ${ABI}; deployed under jniLibs/lib/${ABI})"
+            echo "Android API level: ${ANDROID_API} (matches the app's minSdk)"
+            echo "Configuration: ${{ github.event.inputs.configuration }}"
+            echo "QWENTTS_REF: ${{ github.event.inputs.qwentts_ref }}"
+            echo "GGML_REPO: https://github.com/${{ env.GGML_REPO }}"
+            echo "GGML_REF: ${{ github.event.inputs.ggml_ref }}"
+            echo "GGML_MAX_NAME: 128"
+            echo "Android NDK: ${{ github.event.inputs.android_ndk_version }} (r28+ required)"
+            echo "Enabled backends: cpu (single variant, armv8.2-a+dotprod baseline)"
+            echo ""
+            echo "Android qwentts artifact contents (arm64-v8a only; no armeabi-v7a / x86 / x86_64 slices, so Android emulators are excluded)."
+            echo "This build compiles ggml with GGML_MAX_NAME=128 (the upstream default is 64) so the ggml_tensor layout matches the other ggml-based runtimes linked into the same app (llama.cpp, stable-diffusion and SeasonGGML, which all use 128)."
+            echo "GGML_BACKEND_DL=OFF: libggml-cpu.so is a plain shared library linked into libggml.so via DT_NEEDED, so the backend registry self-registers at load time (same runtime model as iOS) and nothing has to be scanned or dlopen'd by the app."
+            echo "CPU targets the armv8.2-a+dotprod baseline (Cortex-A75 class and newer), the same CPU floor the iOS build uses (M1 baseline)."
+            echo "CUDA and Vulkan do not exist on the Android target and are explicitly disabled (qwentts.cpp is transformer-based, so cuDNN is never loaded)."
+            echo "The NDK links 16 KB page-size aligned libraries by default; every shipped .so is re-checked below (Play requirement)."
+            echo ""
+            echo "The ggml core libraries (libggml.so, libggml-base.so, libggml-cpu.so) are also produced by the SeasonGGML / llama.cpp / stable-diffusion Android builds from the same ggml ref; ship exactly ONE copy of them inside the APK and let libllama.so / libstable-diffusion.so / libqwen.so resolve it via DT_NEEDED."
+            echo ""
+            echo "Artifact contents:"
+            (cd "$out" && ls -1 | sort)
+          } > "$out/README.txt"
+
+      - name: Verify 16 KB page-size alignment
+        run: |
+          set -euo pipefail
+
+          out="out/runtimes/${RID}/native"
+          READELF="${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf"
+          MIN_ALIGN=$((0x4000))
+
+          # Play rejects uploads where any 64-bit .so carries a PT_LOAD segment
+          # aligned below 16 KB. The loop runs over the exact files that get
+          # uploaded (not the build tree), and the AArch64 check catches a
+          # mis-built host/32-bit artifact before it can reach an app.
+          report=""
+          for so in "$out"/*.so; do
+            machine="$("${READELF}" -h "$so" | sed -n 's/^ *Machine: *//p')"
+            if [ "${machine}" != "AArch64" ]; then
+              echo "$(basename "$so"): expected AArch64, found '${machine}'" >&2
+              exit 1
+            fi
+
+            min_align=""
+            while read -r align; do
+              value=$((align))
+              if [ -z "${min_align}" ] || [ "${value}" -lt "${min_align}" ]; then
+                min_align="${value}"
+              fi
+            done < <("${READELF}" -lW "$so" | awk '$1 == "LOAD" { print $NF }')
+
+            if [ -z "${min_align}" ] || [ "${min_align}" -lt "${MIN_ALIGN}" ]; then
+              echo "$(basename "$so"): smallest PT_LOAD alignment is below 16 KB" >&2
+              "${READELF}" -lW "$so" >&2
+              exit 1
+            fi
+
+            printf '  %-28s min PT_LOAD align = 0x%x\n' "$(basename "$so")" "${min_align}"
+            report="${report}$(basename "$so"): min PT_LOAD align = 0x$(printf '%x' "${min_align}")"$'\n'
+          done
+
+          {
+            echo ""
+            echo "16 KB page-size alignment (Play requirement, verified after the build):"
+            printf '%s' "${report}"
+          } >> "$out/README.txt"
+
+          echo ""
+          echo "All .so files are 16 KB page-size aligned."
+
+      - name: Upload Android artifacts
         uses: actions/upload-artifact@v4
         with:
           name: qwentts-${{ env.RID }}-${{ github.event.inputs.configuration }}
