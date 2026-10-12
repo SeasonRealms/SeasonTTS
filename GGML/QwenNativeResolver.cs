@@ -16,7 +16,10 @@ namespace Season.TTS.GGML;
 /// glibc registers each SONAME on load, which then satisfies the NEEDED entries.
 /// Windows resolves through the DLL search path (the MSBuild Content items copy the
 /// .dll files to the output root) and the Apple platforms link or bundle the
-/// runtime, so only Linux needs this.
+/// runtime, so only Linux needs this. Android needs nothing here either: the .so
+/// files ship in the APK's jniLibs and the platform linker searches the app's
+/// native library directory for the library and its DT_NEEDED entries alike, so
+/// default probing resolves the chain.
 /// </summary>
 internal static class QwenNativeResolver
 {
