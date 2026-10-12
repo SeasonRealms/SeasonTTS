@@ -1093,6 +1093,64 @@ jobs:
           echo "ANDROID_NDK_HOME=${NDK_DIR}" >> "$GITHUB_ENV"
           echo "Using Android NDK ${NDK_VERSION} at ${NDK_DIR}"
 
+      # GGML_VULKAN=ON needs a build-time shader compiler: the SDK's glslc turns
+      # every Vulkan shader into SPIR-V during the build (the result is embedded
+      # in libggml-vulkan.so, so the runtime keeps no shader files) and the SDK
+      # headers provide <vulkan/vulkan.h>. At link time the NDK sysroot's
+      # libvulkan.so stub satisfies Vulkan::Vulkan, so the real (system) loader
+      # is resolved by Android's linker on-device.
+      - name: Install Vulkan SDK
+        uses: jakoch/install-vulkan-sdk-action@v1
+
+      # The Android configure step needs two things from the Vulkan SDK: glslc
+      # (compiles every Vulkan shader to SPIR-V at build time) and the
+      # SPIRV-Headers CMake package (find_package(SPIRV-Headers CONFIG REQUIRED)
+      # in the ggml fork's src/ggml-vulkan). Probe both here so a missing SDK
+      # piece fails with a clear message instead of a CMake error deep in
+      # configure.
+      #
+      # SPIRV-Headers is located and exported explicitly because ggml's CMake
+      # cannot find it on its own under the NDK toolchain: ggml appends
+      # $VULKAN_SDK to CMAKE_PREFIX_PATH, but the toolchain's root-path "ONLY"
+      # package search re-roots every prefix path into the sysroot, so the
+      # SDK's config files stay invisible to find_package(SPIRV-Headers) during
+      # the Android configure step. A *_DIR passed on the cmake command line is
+      # used as-is and bypasses the re-rooting; the package is header-only (for
+      # the host-side shader generator), so the SDK copy is valid here.
+      - name: Verify Vulkan SDK prerequisites (glslc, headers, SPIRV-Headers)
+        run: |
+          set -euo pipefail
+
+          GLSLC="$(command -v glslc || true)"
+          if [ -z "${GLSLC}" ] && [ -n "${VULKAN_SDK:-}" ]; then
+            GLSLC="${VULKAN_SDK}/bin/glslc"
+          fi
+          if [ ! -x "${GLSLC}" ]; then
+            echo "glslc not found; the Vulkan SDK install step did not provide it." >&2
+            exit 1
+          fi
+          "${GLSLC}" --version
+
+          if [ -z "${VULKAN_SDK:-}" ] || [ ! -d "${VULKAN_SDK}" ]; then
+            echo "VULKAN_SDK is not set to a directory; cannot locate the SPIRV-Headers CMake package." >&2
+            exit 1
+          fi
+
+          config="$(find "${VULKAN_SDK}" \( -iname 'SPIRV-HeadersConfig.cmake' -o -iname 'spirv-headers-config.cmake' \) -print -quit)"
+          if [ -z "${config}" ]; then
+            echo "SPIRV-HeadersConfig.cmake not found under ${VULKAN_SDK}." >&2
+            exit 1
+          fi
+
+          echo "SPIRV_HEADERS_DIR=$(dirname "${config}")" >> "$GITHUB_ENV"
+          echo "Located SPIRV-Headers CMake package: $(dirname "${config}")"
+
+          if [ ! -f "${VULKAN_SDK}/include/vulkan/vulkan.hpp" ]; then
+            echo "vulkan/vulkan.hpp (Vulkan-Hpp) not found under ${VULKAN_SDK}/include." >&2
+            exit 1
+          fi
+          echo "Vulkan-Hpp header present: ${VULKAN_SDK}/include/vulkan/vulkan.hpp"
+
       - name: Configure CMake (Android)
         working-directory: qwentts
         run: |
@@ -1102,18 +1160,38 @@ jobs:
           # -Wl,-z,max-page-size=16384 (already the r28 default; passed
           # explicitly so the 16 KB intent survives toolchain changes and is
           # re-verified post-build).
-          # The backend model differs from Windows/Linux: CPU is the only
-          # backend (no CUDA/Vulkan on Android), and GGML_BACKEND_DL=OFF keeps
-          # it a plain shared library linked into libggml.so via DT_NEEDED, so
-          # the registry self-registers at load time (same runtime model as the
-          # iOS build) and the app only loads libqwen.so - no backend directory
-          # scan or dlopen bookkeeping on the .NET side. The CPU baseline
-          # (armv8.2-a+dotprod, M1/Apple-A14 class) matches the iOS build.
+          # The backend model differs from Windows/Linux: there is no CUDA on
+          # Android, and GGML_BACKEND_DL=OFF keeps every enabled backend (CPU
+          # and Vulkan) a plain shared library linked into libggml.so via
+          # DT_NEEDED, so the registry self-registers at load time (same
+          # runtime model as the iOS build) and the app only loads libqwen.so
+          # - no backend directory scan or dlopen bookkeeping on the .NET
+          # side. Vulkan is enabled (GGML_VULKAN=ON): its shaders are compiled
+          # to SPIR-V by glslc during the build and libggml.so NEEDs
+          # libggml-vulkan.so, so the Vulkan device registers alongside the
+          # CPU device. The CPU baseline (armv8.2-a+dotprod, M1/Apple-A14
+          # class) matches the iOS build.
+          # SPIRV-Headers_DIR comes from the preceding step: the NDK toolchain's
+          # root-path "ONLY" package search hides the Vulkan SDK's config files
+          # from find_package(SPIRV-Headers), while an explicitly passed *_DIR
+          # is used as-is (see that step for the details).
+          #
+          # Vulkan_INCLUDE_DIR is pinned to the SDK for the same root-path
+          # reason: FindVulkan's own search resolves the include directory to
+          # <sysroot>/usr/include, which carries the C headers only - ggml
+          # includes <vulkan/vulkan.hpp> (Vulkan-Hpp) and the SPIR-V headers,
+          # both of which exist only in the SDK's include tree. The library is
+          # deliberately NOT pinned: the sysroot's libvulkan.so stub is the
+          # correct link-time placeholder (libggml-vulkan.so records it as a
+          # DT_NEEDED entry) and Android's linker resolves the real on-device
+          # loader at load time.
           cmake -B build-android -G Ninja \
             -DCMAKE_TOOLCHAIN_FILE="${ANDROID_NDK_HOME}/build/cmake/android.toolchain.cmake" \
             -DANDROID_ABI="${ABI}" \
             -DANDROID_PLATFORM="android-${ANDROID_API}" \
             -DANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES=ON \
+            -DSPIRV-Headers_DIR="${SPIRV_HEADERS_DIR}" \
+            -DVulkan_INCLUDE_DIR="${VULKAN_SDK}/include" \
             -DCMAKE_BUILD_TYPE="${{ github.event.inputs.configuration }}" \
             -DCMAKE_C_FLAGS="-DGGML_MAX_NAME=128" \
             -DCMAKE_CXX_FLAGS="-DGGML_MAX_NAME=128" \
@@ -1127,7 +1205,7 @@ jobs:
             -DGGML_CPU_ARM_ARCH=armv8.2-a+dotprod \
             -DGGML_OPENMP=OFF \
             -DGGML_CUDA=OFF \
-            -DGGML_VULKAN=OFF
+            -DGGML_VULKAN=ON
 
       - name: Build
         working-directory: qwentts
@@ -1153,7 +1231,7 @@ jobs:
             exit 1
           fi
 
-          for name in libggml.so libggml-base.so libggml-cpu.so; do
+          for name in libggml.so libggml-base.so libggml-cpu.so libggml-vulkan.so; do
             if [ ! -f "$out/$name" ]; then
               echo "Required GGML runtime is missing: $name" >&2
               exit 1
@@ -1176,16 +1254,18 @@ jobs:
             echo "GGML_REF: ${{ github.event.inputs.ggml_ref }}"
             echo "GGML_MAX_NAME: 128"
             echo "Android NDK: ${{ github.event.inputs.android_ndk_version }} (r28+ required)"
-            echo "Enabled backends: cpu (single variant, armv8.2-a+dotprod baseline)"
+            echo "Enabled backends: cpu (single variant, armv8.2-a+dotprod baseline), vulkan"
             echo ""
             echo "Android qwentts artifact contents (arm64-v8a only; no armeabi-v7a / x86 / x86_64 slices, so Android emulators are excluded)."
             echo "This build compiles ggml with GGML_MAX_NAME=128 (the upstream default is 64) so the ggml_tensor layout matches the other ggml-based runtimes linked into the same app (llama.cpp, stable-diffusion and SeasonGGML, which all use 128)."
-            echo "GGML_BACKEND_DL=OFF: libggml-cpu.so is a plain shared library linked into libggml.so via DT_NEEDED, so the backend registry self-registers at load time (same runtime model as iOS) and nothing has to be scanned or dlopen'd by the app."
+            echo "GGML_BACKEND_DL=OFF: every enabled backend (libggml-cpu.so, libggml-vulkan.so) is a plain shared library linked into libggml.so via DT_NEEDED, so the backend registry self-registers at load time (same runtime model as iOS) and nothing has to be scanned or dlopen'd by the app."
             echo "CPU targets the armv8.2-a+dotprod baseline (Cortex-A75 class and newer), the same CPU floor the iOS build uses (M1 baseline)."
-            echo "CUDA and Vulkan do not exist on the Android target and are explicitly disabled (qwentts.cpp is transformer-based, so cuDNN is never loaded)."
+            echo "CUDA and OpenMP do not exist on the Android target and are explicitly disabled (qwentts.cpp is transformer-based, so cuDNN is never loaded)."
+            echo "Vulkan is enabled: its shaders are compiled to SPIR-V at build time and libggml.so NEEDs libggml-vulkan.so, so the Android linker loads the Vulkan backend together with the core runtime; the Vulkan device registers alongside the CPU device on devices whose driver supports it."
             echo "The NDK links 16 KB page-size aligned libraries by default; every shipped .so is re-checked below (Play requirement)."
             echo ""
-            echo "The ggml core libraries (libggml.so, libggml-base.so, libggml-cpu.so) are also produced by the SeasonGGML / llama.cpp / stable-diffusion Android builds from the same ggml ref; ship exactly ONE copy of them inside the APK and let libllama.so / libstable-diffusion.so / libqwen.so resolve it via DT_NEEDED."
+            echo "The ggml core libraries (libggml.so, libggml-base.so, libggml-cpu.so, libggml-vulkan.so) are also produced by the SeasonGGML / llama.cpp / stable-diffusion Android builds from the same ggml ref; ship exactly ONE copy of them inside the APK and let libllama.so / libstable-diffusion.so / libqwen.so resolve it via DT_NEEDED."
+            echo "The four libraries travel as a set: whichever libggml.so copy lands in the APK must carry the DT_NEEDED entries for libggml-cpu.so and libggml-vulkan.so, with both backend .so files shipped next to it."
             echo ""
             echo "Artifact contents:"
             (cd "$out" && ls -1 | sort)
@@ -1237,6 +1317,35 @@ jobs:
 
           echo ""
           echo "All .so files are 16 KB page-size aligned."
+
+      # GGML_BACKEND_DL=OFF promises that the app never has to scan or dlopen
+      # backend modules: the Android linker pulls libggml-cpu.so /
+      # libggml-vulkan.so in as DT_NEEDED entries of libggml.so. Validate that
+      # promise on the exact files that get uploaded - a backend dropped from
+      # the link would only surface as a missing device at runtime, so the
+      # build fails here instead.
+      - name: Verify backend DT_NEEDED wiring
+        run: |
+          set -euo pipefail
+
+          out="out/runtimes/${RID}/native"
+          READELF="${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf"
+
+          needed="$("${READELF}" -d "$out/libggml.so" | sed -n 's/.*(NEEDED).*\[\(.*\)\]/\1/p' | sort)"
+          printf 'libggml.so NEEDED entries:\n%s\n' "${needed}"
+
+          for dep in libggml-cpu.so libggml-vulkan.so; do
+            if ! grep -qx "${dep}" <<< "${needed}"; then
+              echo "libggml.so does not NEED ${dep}; the backend was not linked into the core runtime." >&2
+              exit 1
+            fi
+          done
+
+          {
+            echo ""
+            echo "libggml.so DT_NEEDED (backend wiring, verified after the build):"
+            printf '%s\n' "${needed}"
+          } >> "$out/README.txt"
 
       - name: Upload Android artifacts
         uses: actions/upload-artifact@v4
