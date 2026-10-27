@@ -31,16 +31,31 @@ public sealed unsafe class QwenEngine : IDisposable
     /// <param name="codecGgufPath">Path to qwen-tokenizer-12hz-*.gguf</param>
     /// <param name="useFA">Enable fused flash attention when a GPU backend is present.</param>
     /// <param name="clampFp16">Clamp hidden states to FP16 range (sub-Ampere CUDA guard).</param>
-    /// <param name="backend">
-    /// Explicit GGML backend name, e.g. <c>"CPU"</c>, <c>"Vulkan1"</c>,
-    /// <c>"CUDA0"</c>, <c>"Metal"</c>.  <c>null</c> or <c>""</c> selects
-    /// automatically via <c>ggml_backend_init_best</c>.
+    /// <param name="device">
+    /// GGML device to run on, e.g. <c>"CUDA0"</c>, <c>"Vulkan1"</c>,
+    /// <c>"CPU"</c>.  Matching ignores case, and a bare family name
+    /// (<c>"cuda"</c>, <c>"vulkan"</c>, <c>"cpu"</c>) resolves to the first
+    /// device of that family; <c>null</c>, <c>""</c> or <c>"auto"</c> lets
+    /// the runtime pick the best available device.
+    /// <see cref="QwenDevices.Enumerate"/> lists what is visible.
+    /// </param>
+    /// <param name="maxBatch">
+    /// Concurrent synthesis requests batched on the GPU.  0 and 1 keep the
+    /// single sequence behaviour; above 1 the native worker thread coalesces
+    /// concurrent <see cref="Synthesize"/> calls into batched decode steps,
+    /// and every callback then runs on that worker thread.
+    /// </param>
+    /// <param name="codecChunkSec">
+    /// Codec decode chunk in seconds of audio.  0 selects the native 24.0
+    /// default; a shorter chunk bounds the peak decode memory at the cost of
+    /// one context redecode per chunk.
     /// </param>
     /// <exception cref="FileNotFoundException">A GGUF was not found.</exception>
     /// <exception cref="InvalidOperationException">Native init failed.</exception>
     public QwenEngine(string talkerGgufPath, string codecGgufPath,
                       bool useFA = true, bool clampFp16 = false,
-                      string? backend = null)
+                      string? device = null, int maxBatch = 1,
+                      float codecChunkSec = 24.0f)
     {
         ArgumentException.ThrowIfNullOrEmpty(talkerGgufPath);
         ArgumentException.ThrowIfNullOrEmpty(codecGgufPath);
@@ -52,8 +67,12 @@ public sealed unsafe class QwenEngine : IDisposable
         // Pin UTF-8 strings for the duration of qt_init.
         byte[] talkerBytes = Encoding.UTF8.GetBytes(talkerGgufPath + '\0');
         byte[] codecBytes  = Encoding.UTF8.GetBytes(codecGgufPath + '\0');
-        byte[]? backendBytes = backend != null
-            ? Encoding.UTF8.GetBytes(backend + '\0')
+        // The native side needs the exact enumerated name ("CUDA0"), so a
+        // friendly alias such as "cuda" is resolved against the device list
+        // before it crosses the boundary.
+        string? resolvedDevice = QwenDevices.Resolve(device);
+        byte[]? deviceBytes = resolvedDevice != null
+            ? Encoding.UTF8.GetBytes(resolvedDevice + '\0')
             : null;
 
 #region debug-point qwen-engine-init
@@ -61,12 +80,12 @@ public sealed unsafe class QwenEngine : IDisposable
             $"[SeasonTTS2] QwenEngine.ctor " +
             $"talker='{talkerGgufPath}' codec='{codecGgufPath}' " +
             $"useFA={useFA} clampFp16={clampFp16} " +
-            $"backend='{backend ?? "(auto)"}'");
+            $"device='{resolvedDevice ?? "(auto)"}' maxBatch={maxBatch} codecChunkSec={codecChunkSec}");
 #endregion
 
-        fixed (byte* talkerPtr   = talkerBytes)
-        fixed (byte* codecPtr    = codecBytes)
-        fixed (byte* backendPtr  = backendBytes)
+        fixed (byte* talkerPtr  = talkerBytes)
+        fixed (byte* codecPtr   = codecBytes)
+        fixed (byte* devicePtr  = deviceBytes)
         {
             QtInitParams p;
             QwenNative.qt_init_default_params(&p);
@@ -75,8 +94,9 @@ public sealed unsafe class QwenEngine : IDisposable
             p.CodecPath       = codecPtr;
             p.UseFA           = useFA      ? (byte)1 : (byte)0;
             p.ClampFp16       = clampFp16  ? (byte)1 : (byte)0;
-            p.Backend         = backendPtr;
-            p.GpuDeviceIndex  = -1;
+            p.MaxBatch        = maxBatch;
+            p.CodecChunkSec   = codecChunkSec;
+            p.Device          = devicePtr;
 
             _ctx = QwenNative.qt_init(&p);
         }
@@ -107,10 +127,19 @@ public sealed unsafe class QwenEngine : IDisposable
     /// <param name="refCodes">Pre-encoded ICL codes [num_codebooks, T] row-major (Mode B).</param>
     /// <param name="seed">Sampling seed (-1 for random).</param>
     /// <param name="maxNewTokens">Max new audio frames (default 2048).</param>
+    /// <param name="doSample">
+    /// Sample from the talker distribution; <c>false</c> takes the argmax.
+    /// ABI 6 encodes the switch as temperature 0, so a non-zero
+    /// <paramref name="temperature"/> has no effect when sampling is off.
+    /// </param>
     /// <param name="temperature">Talker sampling temperature (default 0.9).</param>
     /// <param name="topK">Talker top-k (default 50, 0 disables).</param>
     /// <param name="topP">Talker top-p (default 1.0).</param>
     /// <param name="repetitionPenalty">Repetition penalty (default 1.05).</param>
+    /// <param name="subtalkerDoSample">Same switch for the sub-talker stack.</param>
+    /// <param name="subtalkerTemperature">Sub-talker sampling temperature (default 0.9).</param>
+    /// <param name="subtalkerTopK">Sub-talker top-k (default 50).</param>
+    /// <param name="subtalkerTopP">Sub-talker top-p (default 1.0).</param>
     /// <param name="cancellationToken">Cooperative cancellation (~83 ms granularity).</param>
     /// <returns>Mono float PCM at 24 kHz.</returns>
     /// <exception cref="ObjectDisposedException">The engine has been freed.</exception>
@@ -135,8 +164,6 @@ public sealed unsafe class QwenEngine : IDisposable
         float subtalkerTemperature = 0.9f,
         int subtalkerTopK = 50,
         float subtalkerTopP = 1.0f,
-        float codecChunkSec = 1.0f,
-        float codecLeftContextSec = 2.0f,
         CancellationToken cancellationToken = default)
     {
         ThrowIfDisposed();
@@ -148,8 +175,7 @@ public sealed unsafe class QwenEngine : IDisposable
         {
             return DoSynthesize(ref marshal, seed, maxNewTokens,
                 doSample, temperature, topK, topP, repetitionPenalty,
-                subtalkerDoSample, subtalkerTemperature, subtalkerTopK, subtalkerTopP,
-                codecChunkSec, codecLeftContextSec);
+                subtalkerDoSample, subtalkerTemperature, subtalkerTopK, subtalkerTopP);
         }
         finally
         {
@@ -161,9 +187,14 @@ public sealed unsafe class QwenEngine : IDisposable
         ref SynthesizeMarshal m,
         long seed, int maxNewTokens,
         bool doSample, float temperature, int topK, float topP, float repetitionPenalty,
-        bool subtalkerDoSample, float subtalkerTemperature, int subtalkerTopK, float subtalkerTopP,
-        float codecChunkSec, float codecLeftContextSec)
+        bool subtalkerDoSample, float subtalkerTemperature, int subtalkerTopK, float subtalkerTopP)
     {
+        // ABI 6 dropped the do_sample flags: a stack takes the argmax when
+        // its temperature is exactly 0. Folding the switch into the
+        // temperature keeps the public bool and selects the same distribution.
+        float talkerTemperature     = doSample          ? temperature          : 0.0f;
+        float subTalkerTemperature  = subtalkerDoSample ? subtalkerTemperature : 0.0f;
+
         QtTtsParams p;
         QwenNative.qt_tts_default_params(&p);
         p.AbiVersion          = QwenNative.QtAbiVersion;
@@ -176,17 +207,13 @@ public sealed unsafe class QwenEngine : IDisposable
         p.RefText             = m.RefTextPtr;
         p.Seed                = seed;
         p.MaxNewTokens        = maxNewTokens;
-        p.DoSample            = doSample ? (byte)1 : (byte)0;
-        p.Temperature         = temperature;
+        p.Temperature         = talkerTemperature;
         p.TopK                = topK;
         p.TopP                = topP;
         p.RepetitionPenalty   = repetitionPenalty;
-        p.SubtalkerDoSample   = subtalkerDoSample ? (byte)1 : (byte)0;
-        p.SubtalkerTemperature = subtalkerTemperature;
+        p.SubtalkerTemperature = subTalkerTemperature;
         p.SubtalkerTopK        = subtalkerTopK;
         p.SubtalkerTopP        = subtalkerTopP;
-        p.CodecChunkSec       = codecChunkSec;
-        p.CodecLeftContextSec = codecLeftContextSec;
         p.RefSpkEmb           = m.RefSpkEmbPtr;
         p.RefSpkDim           = m.RefSpkDim;
         p.RefCodes            = m.RefCodesPtr;
@@ -203,10 +230,9 @@ public sealed unsafe class QwenEngine : IDisposable
             "[SeasonTTS2] qt_synthesize.request " +
             $"textLen={SafeCStringLength(m.TextPtr)} lang='{SafeUtf8(m.LangPtr)}' " +
             $"speaker='{SafeUtf8(m.SpeakerPtr)}' instructLen={SafeCStringLength(m.InstructPtr)} " +
-            $"seed={seed} maxNewTokens={maxNewTokens} doSample={doSample} temperature={temperature} topK={topK} topP={topP} " +
-            $"repetitionPenalty={repetitionPenalty} subtalkerDoSample={subtalkerDoSample} " +
-            $"subtalkerTemperature={subtalkerTemperature} subtalkerTopK={subtalkerTopK} subtalkerTopP={subtalkerTopP} " +
-            $"codecChunkSec={codecChunkSec} codecLeftContextSec={codecLeftContextSec} " +
+            $"seed={seed} maxNewTokens={maxNewTokens} talkerTemp={talkerTemperature} topK={topK} topP={topP} " +
+            $"repetitionPenalty={repetitionPenalty} subtalkerTemp={subTalkerTemperature} " +
+            $"subtalkerTopK={subtalkerTopK} subtalkerTopP={subtalkerTopP} " +
             $"refNSamples={m.RefNSamples} refSpkDim={m.RefSpkDim} refT={m.RefT} " +
             $"cancel={(m.CancelHandle != null)}");
 #endregion
@@ -235,6 +261,10 @@ public sealed unsafe class QwenEngine : IDisposable
     /// <summary>
     /// Run the TTS pipeline in streaming mode, emitting audio chunks via <paramref name="onChunk"/>.
     /// </summary>
+    /// <remarks>
+    /// The codec chunk size is a per-handle setting in ABI 6 and therefore
+    /// belongs to the constructor, not to the call.
+    /// </remarks>
     public void SynthesizeStreaming(
         Action<float[], int> onChunk,
         string text,
@@ -256,8 +286,6 @@ public sealed unsafe class QwenEngine : IDisposable
         float subtalkerTemperature = 0.9f,
         int subtalkerTopK = 50,
         float subtalkerTopP = 1.0f,
-        float codecChunkSec = 24.0f,
-        float codecLeftContextSec = 2.0f,
         CancellationToken cancellationToken = default)
     {
         ThrowIfDisposed();
@@ -271,6 +299,10 @@ public sealed unsafe class QwenEngine : IDisposable
 
         try
         {
+            // ABI 6 folded the do_sample flags into the temperatures.
+            float talkerTemperature    = doSample          ? temperature          : 0.0f;
+            float subTalkerTemperature = subtalkerDoSample ? subtalkerTemperature : 0.0f;
+
             QtTtsParams p;
             QwenNative.qt_tts_default_params(&p);
             p.AbiVersion          = QwenNative.QtAbiVersion;
@@ -283,21 +315,17 @@ public sealed unsafe class QwenEngine : IDisposable
             p.RefText             = marshal.RefTextPtr;
             p.Seed                = seed;
             p.MaxNewTokens        = maxNewTokens;
-            p.DoSample            = doSample ? (byte)1 : (byte)0;
-            p.Temperature         = temperature;
+            p.Temperature         = talkerTemperature;
             p.TopK                = topK;
             p.TopP                = topP;
             p.RepetitionPenalty   = repetitionPenalty;
-            p.SubtalkerDoSample   = subtalkerDoSample ? (byte)1 : (byte)0;
-            p.SubtalkerTemperature = subtalkerTemperature;
+            p.SubtalkerTemperature = subTalkerTemperature;
             p.SubtalkerTopK        = subtalkerTopK;
             p.SubtalkerTopP        = subtalkerTopP;
             p.RefSpkEmb           = marshal.RefSpkEmbPtr;
             p.RefSpkDim           = marshal.RefSpkDim;
             p.RefCodes            = marshal.RefCodesPtr;
             p.RefT                = marshal.RefT;
-            p.CodecChunkSec       = codecChunkSec;
-            p.CodecLeftContextSec = codecLeftContextSec;
             p.OnChunk             = Marshal.GetFunctionPointerForDelegate(s_chunkThunk);
             p.OnChunkUserData     = chunkHandle.IsAllocated ? GCHandle.ToIntPtr(chunkHandle) : IntPtr.Zero;
 
@@ -663,4 +691,109 @@ public sealed unsafe class QwenEngine : IDisposable
             ? 1
             : 0;
     }
+}
+
+// ── Device enumeration ─────────────────────────────────────────────
+
+/// <summary>
+/// Translates the friendly device aliases callers pass to
+/// <see cref="QwenEngine"/> into the exact names the native side accepts.
+///
+/// <para>The native lookup (<c>ggml_backend_dev_by_name</c>) compares
+/// case-insensitively but only against the enumerated device name, so
+/// <c>"cpu"</c> reaches <c>"CPU"</c> while <c>"cuda"</c> never reaches
+/// <c>"CUDA0"</c>. <see cref="Resolve"/> closes that gap by falling back
+/// to the backend family that registered the device.</para>
+/// </summary>
+public static unsafe class QwenDevices
+{
+    /// <summary>
+    /// Devices the runtime can see, in the native enumeration order.  The
+    /// backend plugins are loaded on first use, so the list is complete even
+    /// when no engine exists yet.  An empty list means the loaded native
+    /// library predates the ABI 6 device exports.
+    /// </summary>
+    public static IReadOnlyList<QtDevice> Enumerate()
+    {
+        int count = QwenNative.qt_device_count();
+        if (count <= 0)
+            return [];
+
+        var devices = new List<QtDevice>(count);
+        for (int i = 0; i < count; i++)
+        {
+            QtDeviceInfo info;
+            if (!QwenNative.qt_device_get_info(i, &info))
+                continue;
+
+            devices.Add(new QtDevice(
+                PtrToStringUtf8(info.Name),
+                PtrToStringUtf8(info.Backend),
+                PtrToStringUtf8(info.Description),
+                PtrToStringUtf8(info.DeviceId),
+                (QtDeviceType)info.Type));
+        }
+
+        return devices;
+    }
+
+    /// <summary>
+    /// Resolve a constructor <c>device</c> argument.
+    /// </summary>
+    /// <param name="device">
+    /// Device name (<c>"CUDA0"</c>), backend family (<c>"cuda"</c>), or
+    /// <c>null</c> / <c>""</c> / <c>"auto"</c> for automatic selection.
+    /// </param>
+    /// <returns>
+    /// <c>null</c> to let the runtime pick the best device, otherwise a name
+    /// the native side accepts — or the trimmed argument unchanged when
+    /// nothing matches, so the native error still reports what was asked for.
+    /// </returns>
+    public static string? Resolve(string? device)
+    {
+        if (string.IsNullOrWhiteSpace(device))
+            return null;
+
+        string wanted = device.Trim();
+        if (wanted.Equals("auto", StringComparison.OrdinalIgnoreCase))
+            return null;
+
+        IReadOnlyList<QtDevice> devices;
+        try
+        {
+            devices = Enumerate();
+        }
+        catch (Exception e) when (e is DllNotFoundException or EntryPointNotFoundException)
+        {
+            // Native library without the ABI 6 exports: hand the request to
+            // qt_init, whose diagnostic is more useful than ours.
+            return wanted;
+        }
+
+        if (devices.Count == 0)
+            return wanted;
+
+        foreach (QtDevice d in devices)
+        {
+            if (d.Name.Equals(wanted, StringComparison.OrdinalIgnoreCase))
+                return d.Name;
+        }
+
+        // A bare family name ("cuda", "vulkan") selects the first device the
+        // family registered, matching the enumeration order.
+        foreach (QtDevice d in devices)
+        {
+            if (d.Backend.Equals(wanted, StringComparison.OrdinalIgnoreCase))
+                return d.Name;
+        }
+
+        System.Diagnostics.Debug.WriteLine(
+            $"[SeasonTTS2] QwenDevices.resolve '{wanted}' matched no device; " +
+            $"visible=[{string.Join(", ", devices.Select(d => $"{d.Name}/{d.Backend}"))}]");
+
+        return wanted;
+    }
+
+    private static string PtrToStringUtf8(byte* p) =>
+        p != null ? Marshal.PtrToStringUTF8((IntPtr)p) ?? "" : "";
 }

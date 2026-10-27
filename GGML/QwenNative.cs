@@ -28,7 +28,7 @@ public static unsafe class QwenNative
 #endif
 
     /// <summary>ABI version this binding was compiled against.</summary>
-    public const int QtAbiVersion = 3;
+    public const int QtAbiVersion = 6;
 
     // ── Version & error ───────────────────────────────────────────
 
@@ -39,6 +39,21 @@ public static unsafe class QwenNative
     /// <summary>Thread-local last-error message, NUL-terminated UTF-8.</summary>
     [DllImport(NativeLib, CallingConvention = CallingConvention.Cdecl)]
     public static extern byte* qt_last_error();
+
+    // ── Devices ────────────────────────────────────────────────────
+
+    /// <summary>Devices visible to the runtime; loads the backend plugins once.</summary>
+    [DllImport(NativeLib, CallingConvention = CallingConvention.Cdecl)]
+    public static extern int qt_device_count();
+
+    /// <summary>
+    /// Fill <paramref name="info"/> for one index. The native side returns
+    /// C <c>bool</c> (one byte), so the default four-byte BOOL marshalling
+    /// would read garbage out of the upper bytes.
+    /// </summary>
+    [DllImport(NativeLib, CallingConvention = CallingConvention.Cdecl)]
+    [return: MarshalAs(UnmanagedType.I1)]
+    public static extern bool qt_device_get_info(int index, QtDeviceInfo* info);
 
     // ── Lifecycle ──────────────────────────────────────────────────
 

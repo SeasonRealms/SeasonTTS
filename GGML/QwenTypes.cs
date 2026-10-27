@@ -50,24 +50,72 @@ public unsafe struct QtAudio
         new(Samples, NSamples);
 }
 
+// ── Devices ───────────────────────────────────────────────────────
+// Mirrors qwen.h qt_device_info / ggml_backend_dev_type. Every pointer
+// is owned by the native backend and stays valid for the process
+// lifetime: read it with Marshal.PtrToStringUTF8, never free it.
+
+public enum QtDeviceType
+{
+    Cpu   = 0,   // system memory
+    Gpu   = 1,   // dedicated memory
+    IGPU  = 2,   // integrated GPU on host memory
+    Accel = 3,   // BLAS / AMX style accelerator used alongside the CPU
+    Meta  = 4,   // meta device wrapping several others
+}
+
+[StructLayout(LayoutKind.Sequential)]
+public unsafe struct QtDeviceInfo
+{
+    public byte* Name;         // "CUDA0", "Vulkan1", "CPU", ... -> qt_init_params.device
+    public byte* Backend;      // family that registered it: "CUDA", "Vulkan", "CPU", ...
+    public byte* Description;  // human readable device string
+    public byte* DeviceId;     // PCI "domain:bus:device.function", NULL or "" when unknown
+    public int   Type;         // QtDeviceType
+}
+
+/// <summary>
+/// Managed copy of <see cref="QtDeviceInfo"/>: the native pointers are
+/// converted while they are still guaranteed to be alive.
+/// </summary>
+public sealed record QtDevice(
+    string       Name,
+    string       Backend,
+    string       Description,
+    string       DeviceId,
+    QtDeviceType Type)
+{
+    public override string ToString() =>
+        $"{Name} ({Backend}, {Type}) — {Description}";
+}
+
 // ── Init parameters ───────────────────────────────────────────────
-// Mirrors qwen.h qt_init_params (ABI v3). Strings are UTF-8 byte*.
+// Mirrors qwen.h qt_init_params (ABI 6). Strings are UTF-8 byte*.
+// Field order is the native layout, padding included: do not reorder.
 
 [StructLayout(LayoutKind.Sequential)]
 public unsafe struct QtInitParams
 {
-    public int   AbiVersion;      // QT_ABI_VERSION = 3
+    public int   AbiVersion;      // QT_ABI_VERSION = 6
     public byte* TalkerPath;      // talker GGUF path, UTF-8
     public byte* CodecPath;       // codec  GGUF path, UTF-8
     public byte  UseFA;           // flash attention (bool)
     public byte  ClampFp16;       // clamp hidden to fp16 range (bool)
-    // ABI v3 additions:
-    public byte* Backend;         // explicit backend name (UTF-8), NULL/"" = auto
-    public int   GpuDeviceIndex;  // -1 = auto, >=0 = specific device index
+    // ABI 5 additions:
+    public int   MaxBatch;        // concurrent requests batched on the GPU, 0/1 = single
+    public float CodecChunkSec;   // codec decode chunk in seconds, 0 selects the 24.0 default
+    // ABI 6 additions:
+    public byte* Device;          // GGML device name, NULL selects the best available
 }
 
 // ── Synthesis parameters ──────────────────────────────────────────
-// Mirrors qwen.h qt_tts_params (ABI v2).
+// Mirrors qwen.h qt_tts_params (ABI 6).
+//
+// ABI 6 dropped the do_sample flags: a stack samples when its
+// temperature is above zero and takes the argmax when it is exactly
+// zero, so the managed layer folds doSample into Temperature and
+// SubtalkerDoSample into SubtalkerTemperature. The codec chunk moved
+// into qt_init_params and is a per-handle setting now.
 
 [StructLayout(LayoutKind.Sequential)]
 public unsafe struct QtTtsParams
@@ -82,12 +130,10 @@ public unsafe struct QtTtsParams
     public byte*  RefText;
     public long   Seed;
     public int    MaxNewTokens;
-    public byte   DoSample;
     public float  Temperature;
     public int    TopK;
     public float  TopP;
     public float  RepetitionPenalty;
-    public byte   SubtalkerDoSample;
     public float  SubtalkerTemperature;
     public int    SubtalkerTopK;
     public float  SubtalkerTopP;
@@ -96,8 +142,6 @@ public unsafe struct QtTtsParams
     public IntPtr CancelUserData;
     public IntPtr OnChunk;
     public IntPtr OnChunkUserData;
-    public float  CodecChunkSec;
-    public float  CodecLeftContextSec;
     public float* RefSpkEmb;
     public int    RefSpkDim;
     public int*   RefCodes;

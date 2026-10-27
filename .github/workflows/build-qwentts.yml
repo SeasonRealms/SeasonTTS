@@ -16,9 +16,14 @@ on:
         required: true
         default: "master"
       ggml_ref:
-        description: "SeasonRealms/ggml tag / branch / commit"
+        description: "SeasonRealms/ggml tag / branch / commit (must equal SeasonGGML's build)"
         required: false
-        default: "master"
+        # The product ships ONE ggml: SeasonGGML publishes ggml.dll / ggml-cuda.dll /
+        # ggml-vulkan.dll from SeasonRealms/ggml's season branch tag, and every AI package
+        # is built against that same revision. Not "master": the season tag adds the
+        # fastdiv fix and the GGML_PREC_F32 FlashAttention patches the whole product
+        # relies on, and a ref skew here is a silent behaviour difference at run time.
+        default: "season-0.27.0-trellis1"
       cuda_version:
         description: "CUDA Toolkit version for the Windows and Linux builds"
         required: false
