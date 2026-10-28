@@ -16,14 +16,16 @@ on:
         required: true
         default: "master"
       ggml_ref:
-        description: "SeasonRealms/ggml tag / branch / commit (must equal SeasonGGML's build)"
+        description: "SeasonRealms/ggml tag / branch / commit (must resolve to the ref the other packages build)"
         required: false
-        # The product ships ONE ggml: SeasonGGML publishes ggml.dll / ggml-cuda.dll /
-        # ggml-vulkan.dll from SeasonRealms/ggml's season branch tag, and every AI package
-        # is built against that same revision. Not "master": the season tag adds the
-        # fastdiv fix and the GGML_PREC_F32 FlashAttention patches the whole product
-        # relies on, and a ref skew here is a silent behaviour difference at run time.
-        default: "season-0.27.0-trellis1"
+        # The product ships ONE ggml: every package - SeasonGGML, llama.cpp,
+        # stable-diffusion and SeasonThreeD - compiles SeasonRealms/ggml's master and
+        # ships the ggml*.dll it produced, so whichever package a module is taken from,
+        # it is the same module. master carries the fastdiv fix and the GGML_PREC_F32
+        # FlashAttention patches the whole product relies on, and a ref skew here is a
+        # silent behaviour difference at run time. Deliberately not a tag: the commit
+        # this run resolved is recorded in the artifact manifest.
+        default: "master"
       cuda_version:
         description: "CUDA Toolkit version for the Windows and Linux builds"
         required: false
@@ -186,12 +188,12 @@ jobs:
           # Public header for binding consumers
           Copy-Item qwentts/src/qwen.h -Destination $out
 
-          # Bundle CUDA runtime DLLs so end users do NOT need to install the
-          # CUDA Toolkit.  GGML's CUDA backend links against cudart + cublas;
-          # the other libraries are dependencies of those or may be needed by
-          # future GGML operations (cufft, curand, cusparse, nvJitLink).
-          # cuDNN is NOT included — qwentts.cpp is transformer-based (attention
-          # + MLP), not convolution-based, so cuDNN would never be loaded.
+          # Collect the CUDA runtime GGML's CUDA backend links against (cudart +
+          # cublas, plus the libraries those pull in or a future GGML operation may
+          # need: cufft, curand, cusparse, nvJitLink) so this run proves the DLLs it
+          # linked against are actually present. cuDNN is not needed - qwentts.cpp is
+          # transformer-based (attention + MLP), not convolution-based. None of them
+          # travel with the package; see the strip below.
           if (-not $env:CUDA_PATH) {
             throw "CUDA_PATH is not set after installing CUDA Toolkit."
           }
@@ -325,6 +327,19 @@ jobs:
           Ensure-ComponentDlls -Name "cusparse" -Patterns @("cusparse64_*.dll", "cusparse*.dll") -RedistComponent "libcusparse" -Required $false
           Ensure-ComponentDlls -Name "nvJitLink" -Patterns @("nvJitLink_*.dll", "nvJitLink*.dll") -RedistComponent "libnvjitlink" -Required $false
 
+          # ... and then none of them travel with the package. The CUDA runtime belongs
+          # to cudacudnn-runtime, which SeasonStudio.csproj stages next to every AI
+          # package in exactly this version; keeping a second copy here cost up to
+          # ~700 MB of download per artifact (cublasLt64_12 alone is ~500 MB). The
+          # checks above stay, because they prove the DLLs this build linked against
+          # exist - they just do not leave the runner.
+          $notPackaged = @(Get-ChildItem $out -File | Where-Object {
+            $_.Name -match '^(cudart|cublas|cublasLt|nvrtc|cufft|curand|cusparse|nvJitLink)\d+_\d+\.dll$' -or
+            $_.Name -like 'cudnn*.dll'
+          })
+          foreach ($dll in $notPackaged) { Remove-Item $dll.FullName -Force }
+          Write-Host ("not packaged (cudacudnn-runtime provides them): {0}" -f (($notPackaged | ForEach-Object { $_.Name }) -join ', '))
+
           $manifest = Join-Path $out "README.txt"
           @(
             "Platform: windows-x64",
@@ -333,6 +348,7 @@ jobs:
             "GGML_REPO: ${{ env.GGML_REPO }}",
             "GGML_REF: ${{ github.event.inputs.ggml_ref }}",
             "GGML_MAX_NAME: 128",
+            "CUDA runtime: not packaged - cudart / cublas / cublasLt come from cudacudnn-runtime",
             "CUDA Toolkit version: ${{ github.event.inputs.cuda_version }}",
             "CUDA_PATH: $env:CUDA_PATH",
             "Enabled backends: cpu-all-variants, cuda12, vulkan",
