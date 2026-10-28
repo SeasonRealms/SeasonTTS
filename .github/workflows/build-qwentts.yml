@@ -99,6 +99,61 @@ jobs:
       - name: Clone ggml fork
         run: git clone --depth 1 --branch "${{ github.event.inputs.ggml_ref }}" "https://github.com/${{ env.GGML_REPO }}.git" qwentts/ggml
 
+      # ggml's backend entry points are not in ggml.dll: with GGML_BACKEND_DL=ON
+      # ggml-cpu / ggml-cuda / ggml-vulkan are MODULE libraries that ggml only
+      # add_dependencies() on, so there is no import library and
+      # ggml_backend_cpu_init() & co. cannot be linked. qwentts.cpp already says so
+      # in src/backend.h ("Standalone CPU backend via Registry API (DL-safe, no
+      # ggml-cpu.h needed)") and references none of them today; this step is what
+      # keeps that true, because the failure would otherwise appear as C3861 in the
+      # first build after a refactor or as LNK2019 at the end of a CUDA build.
+      #
+      # The symbol set is read out of ggml's own headers rather than listed here, so
+      # a ggml bump that adds an entry point extends the guard automatically. Legal
+      # shapes are filtered out rather than reported: a symbol named only as a
+      # string for get_proc_address(), a symbol named only inside decltype() to
+      # recover its signature, comments, and paths this lane does not compile
+      # (examples, and ggml itself).
+      - name: Check sources stay on the backend registry API
+        shell: pwsh
+        run: |
+          $src     = 'qwentts'
+          $ggmlInc = 'qwentts/ggml/include'
+          $exempt  = @()
+          $skip    = @('ggml', 'examples')
+
+          # Entry point = the identifier right before '(' on a GGML_BACKEND_API line.
+          $syms = foreach ($h in 'ggml-cpu.h', 'ggml-cuda.h', 'ggml-vulkan.h', 'ggml-metal.h') {
+            foreach ($line in Get-Content -LiteralPath (Join-Path $ggmlInc $h) -ErrorAction SilentlyContinue) {
+              if ($line -match 'GGML_BACKEND_API\s+.*?([A-Za-z_]\w*)\s*\(') { $matches[1] }
+            }
+          }
+          $syms = @($syms | Sort-Object -Unique | Where-Object { $exempt -notcontains $_ })
+          # Fail closed: a silently empty set would leave this step green forever.
+          if ($syms.Count -lt 60) {
+            throw "read only $($syms.Count) backend entry points from $ggmlInc - ggml's headers changed shape and the guard cannot be trusted"
+          }
+
+          $word     = '(?<![A-Za-z0-9_])(?:' + ($syms -join '|') + ')(?![A-Za-z0-9_])'
+          $pathspec = @('.') + ($skip | ForEach-Object { ":(exclude)$_" })
+          $raw      = git -C $src grep --untracked -n -I -w -E ($syms -join '|') -- @pathspec
+          if ($LASTEXITCODE -gt 1) { throw "git grep failed with $LASTEXITCODE" }
+
+          $bad = foreach ($hit in $raw) {
+            $file, $line, $text = $hit -split ':', 3
+            if ($text -match 'get_proc_address|decltype') { continue }
+            $code = $text -replace '"[^"]*"', '""' -replace '//.*$', '' -replace '/\*[^*]*\*/', ''
+            if ($code -notmatch $word) { continue }
+            "${file}:${line}: $($code.Trim())"
+          }
+
+          if ($bad) {
+            $bad | ForEach-Object { Write-Host $_ }
+            throw "$($bad.Count) backend-module symbol(s) referenced directly - use the registry API described above"
+          }
+          Write-Host "no backend entry point is referenced outside comments and registry lookups ($($syms.Count) checked)"
+          exit 0
+
       - name: Install Vulkan SDK
         uses: jakoch/install-vulkan-sdk-action@v1
 
@@ -391,6 +446,63 @@ jobs:
 
       - name: Clone ggml fork
         run: git clone --depth 1 --branch "${{ github.event.inputs.ggml_ref }}" "https://github.com/${{ env.GGML_REPO }}.git" qwentts/ggml
+
+      # Same guard as the Windows lane, same symbol set, same filtering: see the
+      # comment there for why GGML_BACKEND_DL=ON makes a direct call to a backend
+      # entry point unlinkable. Kept as a shell script rather than shared with the
+      # Windows step because the two lanes already use their platform's shell
+      # everywhere else; the logic below is the same line for line.
+      - name: Check sources stay on the backend registry API
+        run: |
+          set -euo pipefail
+          src='qwentts'
+          ggml_inc='qwentts/ggml/include'
+          exempt=''
+          skip='ggml examples'
+
+          # Entry point = the identifier right before '(' on a GGML_BACKEND_API line.
+          syms=$(for h in ggml-cpu.h ggml-cuda.h ggml-vulkan.h ggml-metal.h; do
+                   if [ -f "$ggml_inc/$h" ]; then cat "$ggml_inc/$h"; fi
+                 done | awk '
+                   /GGML_BACKEND_API/ {
+                     i = index($0, "(")
+                     if (i == 0) next
+                     head = substr($0, 1, i - 1)
+                     if (match(head, /[A-Za-z_][A-Za-z0-9_]*[ \t]*$/)) {
+                       name = substr(head, RSTART, RLENGTH)
+                       gsub(/[ \t]+/, "", name)
+                       print name
+                     }
+                   }' | sort -u)
+          if [ -n "$exempt" ]; then
+            syms=$(printf '%s\n' "$syms" | grep -v -x -E "$exempt")
+          fi
+
+          # Fail closed: a silently empty set would leave this step green forever.
+          count=$(printf '%s\n' "$syms" | grep -c . || true)
+          if [ "$count" -lt 60 ]; then
+            echo "::error::read only $count backend entry points from $ggml_inc - ggml's headers changed shape and the guard cannot be trusted"
+            exit 1
+          fi
+
+          pattern=$(printf '%s\n' "$syms" | paste -sd'|')
+          excludes=()
+          for d in $skip; do excludes+=(":(exclude)$d"); done
+          raw=$(git -C "$src" grep --untracked -n -I -w -E "$pattern" -- . "${excludes[@]}" || true)
+
+          # Comments and string literals are stripped first, so a symbol that only
+          # appears as a get_proc_address() name or in a comment is not a reference.
+          bad=$(printf '%s\n' "$raw" |
+                  grep -v -E 'get_proc_address|decltype' |
+                  sed -E 's/"[^"]*"/""/g; s#//.*##; s#/\*[^*]*\*/##g' |
+                  grep -w -E "$pattern" || true)
+
+          if [ -n "$bad" ]; then
+            echo "$bad"
+            echo "::error::backend-module symbol(s) referenced directly - use the registry API described above"
+            exit 1
+          fi
+          echo "no backend entry point is referenced outside comments and registry lookups ($count checked)"
 
       # Same build-time toolchain as the Windows job: Vulkan SDK for ggml-vulkan
       # (provides glslc) and CUDA Toolkit for ggml-cuda (nvcc + cudart + cuBLAS).
