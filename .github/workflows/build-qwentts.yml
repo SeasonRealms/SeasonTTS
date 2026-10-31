@@ -18,13 +18,15 @@ on:
       ggml_ref:
         description: "SeasonRealms/ggml tag / branch / commit (must resolve to the ref the other packages build)"
         required: false
-        # The product ships ONE ggml: every package - SeasonGGML, llama.cpp,
-        # stable-diffusion and SeasonThreeD - compiles SeasonRealms/ggml's master and
-        # ships the ggml*.dll it produced, so whichever package a module is taken from,
-        # it is the same module. master carries the fastdiv fix and the GGML_PREC_F32
-        # FlashAttention patches the whole product relies on, and a ref skew here is a
-        # silent behaviour difference at run time. Deliberately not a tag: the commit
-        # this run resolved is recorded in the artifact manifest.
+        # The product ships ONE ggml runtime and ONE download source for it: the
+        # SeasonGGML build-ggml.yml artifacts. This workflow compiles SeasonRealms/ggml
+        # only because qwentts.cpp links against it - the ggml DLLs this build produces
+        # stay on the runner and are NOT packaged (see "Collect artifacts"), so ggml_ref
+        # has to resolve to the ref SeasonGGML's ggml-* artifacts were built from.
+        # master carries the fastdiv fix and the GGML_PREC_F32 FlashAttention patches
+        # the whole product relies on, and a ref skew here is a silent behaviour
+        # difference at run time. Deliberately not a tag: the commit this run resolved
+        # is recorded in the artifact manifest.
         default: "master"
       cuda_version:
         description: "CUDA Toolkit version for the Windows and Linux builds"
@@ -221,10 +223,13 @@ jobs:
           Copy-Item qwentts/build/qwen.dll -Destination $out -ErrorAction SilentlyContinue
           Copy-Item qwentts/build/qwen.lib -Destination $out -ErrorAction SilentlyContinue
 
-          $ggmlDlls = Get-ChildItem qwentts/build -Recurse -File -Filter "ggml*.dll"
-          foreach ($dll in $ggmlDlls) {
-            Copy-Item $dll.FullName -Destination $out -Force
-          }
+          # The ggml runtime this build linked against is deliberately NOT packaged.
+          # build-ggml.yml (SeasonGGML) is the single download source for it: copying
+          # ggml.dll / ggml-base.dll / ggml-cpu-*.dll / ggml-cuda.dll / ggml-vulkan.dll
+          # here as well only shipped the same files a second time. The assertions
+          # below read them from qwentts/build, where they must still exist, so a
+          # configure change that stops producing one of them still fails this run.
+          $ggmlRuntime = @(Get-ChildItem qwentts/build -Recurse -File -Filter "ggml*.dll")
 
           $requiredGgmlDlls = @(
             "ggml.dll",
@@ -234,15 +239,16 @@ jobs:
           )
 
           foreach ($name in $requiredGgmlDlls) {
-            if (-not (Test-Path (Join-Path $out $name))) {
-              throw "Required GGML runtime is missing: $name"
+            if (-not ($ggmlRuntime | Where-Object { $_.Name -eq $name })) {
+              throw "Required GGML runtime was not produced: $name"
             }
           }
 
-          $cpuBackends = Get-ChildItem $out -File | Where-Object { $_.Name -like 'ggml-cpu*.dll' } | Sort-Object Name
+          $cpuBackends = @($ggmlRuntime | Where-Object { $_.Name -like 'ggml-cpu*.dll' } | Sort-Object Name)
           if ($cpuBackends.Count -eq 0) {
             throw "No CPU GGML backend variants were produced."
           }
+          Write-Host ("ggml runtime not packaged (build-ggml.yml provides it): {0}" -f (($cpuBackends | ForEach-Object { $_.Name }) -join ', '))
 
           # Public header for binding consumers
           Copy-Item qwentts/src/qwen.h -Destination $out
@@ -414,8 +420,9 @@ jobs:
             "",
             "Windows qwentts artifact contents:",
             "CPU uses GGML_CPU_ALL_VARIANTS with GGML_BACKEND_DL so one runtime can expose multiple x86 CPU variants and let ggml choose the best supported backend at runtime.",
+            "ggml runtime: NOT PACKAGED - build-ggml.yml (SeasonGGML, artifact ggml-win-x64-multi-backend-*) is the single download source for ggml.dll / ggml-base.dll / ggml-cpu-*.dll / ggml-cuda.dll / ggml-vulkan.dll (same ggml_ref, GGML_MAX_NAME=160). Stage that artifact next to this one; qwen.dll resolves it by name.",
             "",
-            "CPU backend DLLs:"
+            "CPU backend DLLs this build was linked against (shipped by the SeasonGGML artifact):"
           ) | Set-Content -Path $manifest -Encoding ascii
 
           $cpuBackends | ForEach-Object {
@@ -566,7 +573,12 @@ jobs:
           # files under every name that dlopen and the linker-recorded SONAMEs
           # look for at runtime.
           find qwentts/build -name 'libqwen.so*' -exec cp -Lf {} "$out/" \;
-          find qwentts/build -name 'libggml*.so*' -exec cp -Lf {} "$out/" \;
+
+          # The ggml runtime is NOT packaged: build-ggml.yml (SeasonGGML) is the single
+          # download source for libggml*.so, and build/ only holds it because this build
+          # compiled ggml from SeasonRealms/ggml to link libqwen.so against it. The
+          # checks below read qwentts/build, which must still contain the complete
+          # runtime, so a configure change that stops emitting one of these still fails.
 
           if [ ! -f "$out/libqwen.so" ]; then
             echo "libqwen.so not found" >&2
@@ -574,17 +586,19 @@ jobs:
           fi
 
           for name in libggml.so libggml-base.so libggml-cuda.so libggml-vulkan.so; do
-            if [ ! -f "$out/$name" ]; then
-              echo "Required GGML runtime is missing: $name" >&2
+            if ! find qwentts/build -name "$name" | grep -q .; then
+              echo "Required GGML runtime was not produced: $name" >&2
               exit 1
             fi
           done
 
-          cpu_backends=$(find "$out" -maxdepth 1 -type f -name 'libggml-cpu*.so' | sort)
+          cpu_backends=$(find qwentts/build -type f -name 'libggml-cpu*.so' -printf '%f\n' | sort -u)
           if [ -z "$cpu_backends" ]; then
             echo "No CPU GGML backend variants were produced." >&2
             exit 1
           fi
+          echo "ggml runtime not packaged (build-ggml.yml provides it):"
+          echo "$cpu_backends"
 
           # Public header for binding consumers
           cp qwentts/src/qwen.h "$out"
@@ -604,7 +618,9 @@ jobs:
             echo ""
             echo "CUDA runtimes are NOT bundled: install CUDA 12.x system-wide for the CUDA backend (qwentts.cpp is transformer-based, so cuDNN is never loaded)."
             echo ""
-            echo "CPU backend libraries:"
+            echo "ggml runtime: NOT PACKAGED - build-ggml.yml (SeasonGGML, artifact ggml-linux-x64-multi-backend-*) is the single download source for libggml.so / libggml-base.so / libggml-cpu*.so / libggml-cuda.so / libggml-vulkan.so (same ggml_ref, GGML_MAX_NAME=160). Stage that artifact next to this one; libqwen.so resolves it by SONAME."
+            echo ""
+            echo "CPU backend libraries this build was linked against (shipped by the SeasonGGML artifact):"
             echo "$cpu_backends"
             echo ""
             echo "Artifact contents:"
@@ -852,6 +868,7 @@ jobs:
             echo "Mac Catalyst qwentts artifact contents:"
             echo "Apple Silicon only: no x86_64 slice is produced, so this runtime does not load on Intel Macs. Add a maccatalyst-x64 build if Intel support is needed again."
             echo "Static linkage: qwen-core, ggml and every backend are archived into libqwen.dylib and registered at runtime by ggml's backend registry; nothing is dlopen'd, so the app bundle contains a single Mach-O to sign."
+            echo "ggml: compiled INTO libqwen.dylib, so this artifact ships no separate libggml file - unlike win-x64 / linux-x64 / android-arm64 there is nothing here to hand over to the SeasonGGML artifact, and ggml.txt stays because ggml's code is redistributed inside this Mach-O. The libggml.dylib the app bundle also carries is SeasonGGML's own artifact and is not shared with this one."
             echo "CPU targets the M1 baseline (armv8.2-a+dotprod). GGML_CPU_ALL_VARIANTS is intentionally NOT used because it requires GGML_BACKEND_DL; M1 and every later Apple Silicon chip run this baseline."
             echo "Metal uses GGML_METAL_EMBED_LIBRARY so the shader source travels inside libqwen.dylib; no default.metallib has to be deployed or located in the app bundle."
             echo "Metal targets the Apple Silicon unified-memory GPU only; Intel integrated and AMD discrete GPUs are out of scope for this artifact."
@@ -1158,6 +1175,7 @@ jobs:
             echo "Two slices only, both arm64: ios-arm64 (device) and ios-arm64-simulator (Apple Silicon Macs). One arm64 iOS target does NOT also cover the simulator - device and simulator are distinct Mach-O platforms; no x86_64 simulator slice is produced, Intel Macs are out of scope."
             echo "SeasonTTS declares the qwentts P/Invokes as __Internal on iOS (unlike the libqwen dylib used on Linux/Mac Catalyst), so the app statically links libqwen.a via NativeReference (Kind=Static)."
             echo "Static linkage: qwen-core, ggml and every backend are archived into the single libqwen.a and registered at runtime by ggml's backend registry; nothing is dlopen'd."
+            echo "ggml: merged INTO libqwen.a, so this artifact ships no separate libggml.a - unlike win-x64 / linux-x64 / android-arm64 there is nothing here to hand over to the SeasonGGML libggml.xcframework, and ggml.txt stays because ggml's code is redistributed inside this archive. When libqwen.a is the ForceLoad=True owner, this embedded ggml copy is the one ggml-only P/Invokes resolve to."
             echo "This build compiles ggml with GGML_MAX_NAME=160 (the upstream default is 64) so the ggml_tensor layout matches the other ggml-based runtimes linked into the same app (llama.cpp, stable-diffusion and SeasonGGML, which all use 160)."
             echo "CPU targets the M1 baseline (armv8.2-a+dotprod), supported by every A12+ device and every Apple Silicon simulator."
             echo "Metal uses GGML_METAL_EMBED_LIBRARY so the shader source travels inside libqwen.a; no default.metallib has to be deployed or located in the app bundle."
@@ -1283,7 +1301,13 @@ jobs:
           # only defends against toolchain changes that would reintroduce the
           # Linux-style symlink chain.
           find qwentts/build-android -name 'libqwen.so*' -exec cp -Lf {} "$out/" \;
-          find qwentts/build-android -name 'libggml*.so*' -exec cp -Lf {} "$out/" \;
+
+          # The ggml core libraries are NOT packaged: build-ggml.yml (SeasonGGML) is the
+          # single download source for libggml*.so, and build-android/ only holds them
+          # because this build compiled ggml from SeasonRealms/ggml to link libqwen.so
+          # against it. The checks below read build-android, which must still contain the
+          # complete runtime, so a configure change that stops emitting one of these
+          # still fails here instead of on a user's device.
 
           if [ ! -f "$out/libqwen.so" ]; then
             echo "libqwen.so not found" >&2
@@ -1291,18 +1315,17 @@ jobs:
           fi
 
           for name in libggml.so libggml-base.so libggml-cpu.so; do
-            if [ ! -f "$out/$name" ]; then
-              echo "Required GGML runtime is missing: $name" >&2
+            if ! find qwentts/build-android -name "$name" | grep -q .; then
+              echo "Required GGML runtime was not produced: $name" >&2
               exit 1
             fi
           done
+          echo "ggml runtime not packaged (build-ggml.yml provides it):"
+          find qwentts/build-android -name 'libggml*.so' -printf '  %f\n' | sort -u
 
           # Public header for binding consumers
           cp qwentts/src/qwen.h "$out"
           cp qwentts/LICENSE "$out/qwentts.txt"
-          if [ -f qwentts/ggml/LICENSE ]; then
-            cp qwentts/ggml/LICENSE "$out/ggml.txt"
-          fi
 
           {
             echo "Platform: ${RID} (ABI: ${ABI}; deployed under jniLibs/lib/${ABI})"
@@ -1322,7 +1345,7 @@ jobs:
             echo "CUDA and Vulkan do not exist on the Android target and are explicitly disabled (qwentts.cpp is transformer-based, so cuDNN is never loaded)."
             echo "The NDK links 16 KB page-size aligned libraries by default; every shipped .so is re-checked below (Play requirement)."
             echo ""
-            echo "The ggml core libraries (libggml.so, libggml-base.so, libggml-cpu.so) are also produced by the SeasonGGML / llama.cpp / stable-diffusion Android builds from the same ggml ref; ship exactly ONE copy of them inside the APK and let libllama.so / libstable-diffusion.so / libqwen.so resolve it via DT_NEEDED."
+            echo "ggml runtime: NOT PACKAGED - build-ggml.yml (SeasonGGML, artifact ggml-android-arm64-multi-backend-*) is the single download source for libggml.so / libggml-base.so / libggml-cpu.so (same ggml_ref, GGML_MAX_NAME=160). Ship that one inside jniLibs/lib/${ABI} and let libqwen.so resolve it via DT_NEEDED; a copy from this artifact would only duplicate it."
             echo ""
             echo "Artifact contents:"
             (cd "$out" && ls -1 | sort)
