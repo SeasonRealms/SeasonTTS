@@ -195,7 +195,11 @@ jobs:
             '-DGGML_VULKAN=ON',
             '-DGGML_BACKEND_DL=ON',
             '-DGGML_CUDA_CUB_3DOT2=ON',
-            '-DCMAKE_CUDA_FLAGS=-Xcudafe "--diag_suppress=177" -Xcudafe "--diag_suppress=550" /DGGML_MAX_NAME=128',
+            # nvcc takes -D, not cl's /D: a bare /D... is parsed as an input file, so the
+            # CUDA compiler test dies with "A single input file is required for a non-link
+            # phase when an outputfile is specified". -Xcudafe uses '=' so the flag string
+            # carries no embedded quotes.
+            '-DCMAKE_CUDA_FLAGS=-Xcudafe=--diag_suppress=177 -Xcudafe=--diag_suppress=550 -DGGML_MAX_NAME=128',
             '-DCMAKE_CUDA_ARCHITECTURES=${{ github.event.inputs.cuda_architectures }}'
           )
 
